@@ -1,0 +1,64 @@
+name: Lint & Syntax
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  # ─── Verification syntaxe Bash ─────────────────────────────────────────────
+  bash-syntax:
+    name: Bash syntax (bash -n)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check syntax
+        run: bash -n pqc_bench.sh
+
+  # ─── ShellCheck (analyse statique Bash) ────────────────────────────────────
+  # continue-on-error car certains patterns complexes (heredocs Python,
+  # tableaux associatifs) peuvent generer des avertissements non bloquants.
+  shellcheck:
+    name: ShellCheck (severite error)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+      - name: Run shellcheck
+        run: shellcheck --severity=error --shell=bash pqc_bench.sh
+        continue-on-error: true
+
+  # ─── Verification syntaxe Python ───────────────────────────────────────────
+  python-syntax:
+    name: Python syntax (py_compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile check
+        run: |
+          python3 -m py_compile traffic_gen.py
+          python3 -m py_compile traffic_presets.py
+          echo "Syntax OK"
+
+  # ─── Verification imports Python ───────────────────────────────────────────
+  # Verifie que les imports standards sont disponibles sans executer le code.
+  python-imports:
+    name: Python imports check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install psutil
+      - name: Check imports
+        run: |
+          python3 -c "import traffic_gen"
+          python3 -c "import traffic_presets"
+          echo "Imports OK"

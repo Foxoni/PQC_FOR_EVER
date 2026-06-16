@@ -1,0 +1,53 @@
+# ─── Resultats de tests ──────────────────────────────────────────────────────
+results/
+*.csv
+aggregate_*.csv
+
+# ─── Fichiers temporaires generes par le script ──────────────────────────────
+*.json
+timing_*.txt
+monitor_*.csv
+iperf_*.json
+handshake_timing.txt
+
+# ─── Certificats et cles privees (JAMAIS dans git) ───────────────────────────
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+certs/
+cert_*/
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+*.log
+*.out
+
+# ─── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Editeurs ────────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── Variables d'environnement ───────────────────────────────────────────────
+.env
+.env.local
