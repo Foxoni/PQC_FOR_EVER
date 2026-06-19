@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""
+vm_agent.py - Daemon de controle sur chaque VM de test PQC.
+Ecoute sur TCP 9998, repond aux commandes JSON de server_cli.py.
+
+Etats : idle -> configured -> armed -> running -> done
+
+Lancement :
+    python3 vm_agent.py [--port PORT]
+"""
+
+import sys
+import json
+import socket
+import subprocess
+import threading
+from pathlib import Path
+
+PORT       = 9998
+SCRIPT_DIR = Path(__file__).resolve().parent
+BENCH      = SCRIPT_DIR / "pqc_bench.sh"
+RESULTS    = SCRIPT_DIR / "results"
+
+
+class VMAgent:
+    def __init__(self):
+        self._lock   = threading.Lock()
+        self.state   = "idle"
+        self.cfg     = {}
+        self.proc    = None
+        self.outfile = None
+
+    # ------------------------------------------------------------------ #
+    # Handlers                                                             #
+    # ------------------------------------------------------------------ #
+
+    def _status(self, _req):
+        with self._lock:
+            if self.proc and self.proc.poll() is not None and self.state == "running":
+                self.state = "done"
+            return {
+                "ok":          True,
+                "state":       self.state,
+                "config":      self.cfg,
+                "has_results": bool(self.outfile and Path(self.outfile).exists()),
+            }
+
+    def _configure(self, req):
+        with self._lock:
+            if self.state == "running":
+                return {"ok": False, "error": "test en cours, impossible de configurer"}
+            self.cfg = {
+                "preset":      req.get("preset"),
+                "mode":        req.get("mode", "mlkem768"),
+                "wan_profile": req.get("wan_profile", "eu"),
+                "duration":    req.get("duration"),
+            }
+            RESULTS.mkdir(exist_ok=True)
+            tag          = f"p{self.cfg['preset']}" if self.cfg["preset"] is not None else "r"
+            self.outfile = str(RESULTS / f"result_{self.cfg['mode']}_{tag}.csv")
+            self.state   = "configured"
+            return {"ok": True, "state": self.state, "config": self.cfg}
+
+    def _arm(self, _req):
+        with self._lock:
+            if self.state not in ("configured", "done"):
+                return {"ok": False, "error": f"etat '{self.state}' invalide pour arm"}
+            self.state = "armed"
+            return {"ok": True, "state": self.state}
+
+    def _start(self, _req):
+        with self._lock:
+            if self.state != "armed":
+                return {"ok": False, "error": f"etat '{self.state}' invalide pour start"}
+
+            cmd = ["bash", str(BENCH), "--test",
+                   "--mode", self.cfg["mode"],
+                   "--output", self.outfile]
+            if self.cfg.get("preset") is not None:
+                cmd += ["--preset", str(self.cfg["preset"])]
+            if self.cfg.get("wan_profile"):
+                cmd += ["--wan-profile", self.cfg["wan_profile"]]
+            if self.cfg.get("duration"):
+                cmd += ["--duration", str(self.cfg["duration"])]
+
+            self.proc  = subprocess.Popen(cmd, cwd=str(SCRIPT_DIR),
+                                          stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL)
+            self.state = "running"
+            pid        = self.proc.pid
+
+        def _watch():
+            self.proc.wait()
+            with self._lock:
+                if self.state == "running":
+                    self.state = "done"
+
+        threading.Thread(target=_watch, daemon=True).start()
+        return {"ok": True, "state": "running", "pid": pid}
+
+    def _reset(self, _req):
+        with self._lock:
+            if self.proc and self.proc.poll() is None:
+                self.proc.terminate()
+            self.proc    = None
+            self.outfile = None
+            self.cfg     = {}
+            self.state   = "idle"
+            return {"ok": True, "state": "idle"}
+
+    def _get_results(self, _req):
+        path = self.outfile
+        if not path or not Path(path).exists():
+            return {"ok": False, "error": "aucun fichier de resultats"}
+        return {"ok": True, "content": Path(path).read_text(), "file": path}
+
+    _DISPATCH = {
+        "STATUS":      _status,
+        "CONFIGURE":   _configure,
+        "ARM":         _arm,
+        "START":       _start,
+        "RESET":       _reset,
+        "GET_RESULTS": _get_results,
+    }
+
+    # ------------------------------------------------------------------ #
+    # Gestion des connexions entrantes                                     #
+    # ------------------------------------------------------------------ #
+
+    def handle(self, conn):
+        try:
+            buf = b""
+            while b"\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+            req  = json.loads(buf.split(b"\n")[0])
+            fn   = self._DISPATCH.get(req.get("cmd", "").upper())
+            resp = fn(self, req) if fn else {"ok": False, "error": "commande inconnue"}
+        except Exception as e:
+            resp = {"ok": False, "error": str(e)}
+        try:
+            conn.sendall((json.dumps(resp) + "\n").encode())
+        except OSError:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# Point d'entree                                                               #
+# --------------------------------------------------------------------------- #
+
+def main():
+    port = PORT
+    if "--port" in sys.argv:
+        try:
+            port = int(sys.argv[sys.argv.index("--port") + 1])
+        except (IndexError, ValueError):
+            print("Usage: vm_agent.py [--port PORT]", file=sys.stderr)
+            sys.exit(1)
+
+    agent = VMAgent()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("0.0.0.0", port))
+        srv.listen(16)
+        print(f"[vm_agent] ecoute :{port}  bench={BENCH}")
+
+        while True:
+            conn, _addr = srv.accept()
+            threading.Thread(target=agent.handle, args=(conn,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()

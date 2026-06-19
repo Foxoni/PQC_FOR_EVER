@@ -22,46 +22,52 @@ Ce projet le mesure.
 
 ## Architecture des fichiers
 
-```
+```text
 pqc_bench/
-├── pqc_bench.sh          # Script principal - orchestration et CLI
+├── pqc_bench.sh          # Moteur de test - generation certificats, handshake, trafic
 ├── traffic_gen.py        # Module utilitaire (stats, monitoring CPU/RAM, CSV)
 ├── traffic_presets.py    # Generateur de trafic - presets + mode continu aleatoire
+├── vm_agent.py           # Daemon de controle sur chaque VM de test (port 9998)
+├── server_cli.py         # CLI central sur le serveur - orchestre toutes les VMs
 └── results/              # Fichiers CSV produits (cree automatiquement)
 ```
 
 ### Role de chaque fichier
 
 | Fichier | Role |
-|---|---|
-| `pqc_bench.sh` | Point d'entree, parsing CLI, generation de certificats, mesure handshake, orchestration |
-| `traffic_gen.py` | Calcul statistiques (min/avg/max/p99), monitoring CPU/RAM via psutil, parsing JSON iperf3, fusion CSV |
+| --- | --- |
+| `pqc_bench.sh` | Moteur d'execution : certificats, handshake TLS, orchestration trafic, ecriture CSV |
+| `traffic_gen.py` | Stats (min/avg/max/p99), monitoring CPU/RAM psutil, parsing JSON iperf3, fusion CSV |
 | `traffic_presets.py` | 5 presets PME predefinis + mode aleatoire continu, handshake TLS par connexion |
+| `vm_agent.py` | Daemon TCP sur chaque VM cliente : recoit les ordres du serveur, lance pqc_bench.sh |
+| `server_cli.py` | CLI interactif sur le serveur WAN : scan, configuration, lancement synchronise, collecte |
 
 ---
 
 ## Topologie reseau cible
 
-```
+```text
                     [ Internet / WAN ]
                            |
                         [ R2 ] <- Routeur
                            |
                       [ Pare-feu ]
                            |
-                    [ VM Serveur WAN ] <- --server (simule le WAN)
+             [ VM Serveur WAN ] <- --server + server_cli.py
                            |
                        [ ESW2 ] <- Switch central
                     /    |     \
               [ESW1]  [WiFi]  [ESW3]
              VLAN 10  VLAN 20  VLAN 30
-            PC1 PC2 PC3  Laptop  Serveur
-                         Mobile
+          PC1 PC2 PC3  Laptop  Serveur
+                        Mobile
+         (vm_agent.py tourne sur chaque VM cliente)
 ```
 
 - **VM Serveur WAN** : unique cible de toutes les VMs clientes, simule un serveur internet
-  avec latence WAN artificielle via tc-netem
-- **VMs clientes** : PC1, PC2, PC3, Laptop, Mobile - chacune execute le script en mode test
+  avec latence WAN artificielle via tc-netem. Heberge aussi `server_cli.py`.
+- **VMs clientes** : PC1, PC2, PC3, Laptop, Mobile - executent `vm_agent.py` en attente
+  d'ordres, puis lancent `pqc_bench.sh` sur commande du serveur.
 
 ---
 
@@ -108,44 +114,127 @@ openssl list -providers | grep oqs
 ### 1. VM Serveur WAN
 
 ```bash
-# Copier les scripts
-scp pqc_bench.sh traffic_gen.py traffic_presets.py user@server_wan:/opt/pqc/
+# Copier tous les scripts
+scp pqc_bench.sh traffic_gen.py traffic_presets.py \
+    vm_agent.py server_cli.py user@server_wan:/opt/pqc/
 
 # Installer les dependances (une seule fois)
 sudo /opt/pqc/pqc_bench.sh --install
 
-# Lancer le serveur (doit tourner avant les clients)
-sudo /opt/pqc/pqc_bench.sh --server --mode classic --wan-profile eu
+# Lancer le serveur de trafic (doit tourner avant les clients)
+sudo /opt/pqc/pqc_bench.sh --server --mode mlkem768 --wan-profile eu
+
+# Dans un second terminal : lancer le CLI de controle
+python3 /opt/pqc/server_cli.py --subnet 192.168.1.0/24
 ```
 
 ### 2. VMs clientes (repeter sur chaque VM)
 
 ```bash
-scp pqc_bench.sh traffic_gen.py traffic_presets.py user@pc1:/opt/pqc/
+scp pqc_bench.sh traffic_gen.py traffic_presets.py \
+    vm_agent.py user@pc1:/opt/pqc/
+
 sudo /opt/pqc/pqc_bench.sh --install
+
+# Lancer le daemon de controle (reste en arriere-plan)
+python3 /opt/pqc/vm_agent.py
 ```
 
 ---
 
-## Utilisation
+## Controle centralise depuis le serveur
 
-### Synopsis
+`server_cli.py` est un CLI interactif qui orchestre toutes les VMs depuis le serveur.
+Les VMs doivent avoir `vm_agent.py` en cours d'execution.
 
+```text
+PQC Bench -- Controleur central  (tapez 'help' pour l'aide)
+
+pqc>
 ```
-./pqc_bench.sh [MODE] [OPTIONS]
+
+### Commandes disponibles
+
+| Commande | Description |
+| --- | --- |
+| `scan [subnet]` | Scan parallele du sous-reseau, detecte les agents actifs et leur etat |
+| `list` | Tableau : IP, etat, preset, mode, WAN, derniere vue |
+| `set <ip\|all> --mode MODE [--preset N] [--wan-profile WAN] [--duration D]` | Configure une ou toutes les VMs (sans lancer) |
+| `arm [all\|<ip>]` | Met les VMs configurees en standby (pretes a demarrer) |
+| `launch` | Envoie START a toutes les VMs armed **simultanement** |
+| `status [all\|<ip>]` | Poll l'etat actuel (idle / configured / armed / running / done) |
+| `reset [all\|<ip>]` | Remet en idle, kill le test si en cours |
+| `results [--output FILE]` | Collecte les CSV de toutes les VMs et compile un master CSV |
+| `help` | Liste des commandes |
+| `exit` / `quit` | Quitte le CLI |
+
+### Etats d'une VM
+
+```text
+idle --> configured --> armed --> running --> done
+  ^                                            |
+  |______________ reset ______________________|
 ```
 
-### Modes principaux
+### Workflow complet depuis le serveur
 
-| Flag | Description |
-|---|---|
-| *(defaut)* | Test ponctuel - handshake bulk + profils de trafic en parallele |
-| `--random` | Trafic aleatoire **continu** - 5 types de connexions en boucle, staggeres |
-| `--preset N` | Preset predefini 1-5 (trafic staggere, 60s fixes) |
-| `--server` | Mode serveur WAN (a lancer sur la VM derriere le pare-feu) |
-| `--scan` | Cartographie reseau (ping sweep + verification deploiement) |
-| `--collect-only` | Agregation des CSV produits par toutes les VMs |
-| `--install` | Installe toutes les dependances (requiert sudo) |
+```bash
+# 1. Decouvrir les VMs avec vm_agent actif
+pqc> scan 192.168.1.0/24
+  192.168.1.10   [idle]
+  192.168.1.11   [idle]
+  192.168.1.12   [idle]
+
+# 2. Configurer toutes les VMs (pas de lancement immediat)
+pqc> set all --mode mlkem768 --preset 2 --wan-profile eu
+
+# 3. Ou configurer chaque VM individuellement avec un preset different
+pqc> set 192.168.1.10 --mode mlkem768 --preset 1   # Secretariat
+pqc> set 192.168.1.11 --mode mlkem768 --preset 3   # Manager
+pqc> set 192.168.1.12 --mode mlkem768 --preset 5   # IT Technicien
+
+# 4. Mettre toutes les VMs en standby
+pqc> arm all
+
+# 5. Lancement simultane (toutes partent en meme temps)
+pqc> launch
+  Signal envoye en 3 ms
+  192.168.1.10: demarre (pid 1234)
+  192.168.1.11: demarre (pid 1235)
+  192.168.1.12: demarre (pid 1236)
+
+# 6. Surveiller l'avancement
+pqc> status
+  192.168.1.10: running  ...
+  192.168.1.11: done
+  192.168.1.12: running  ...
+
+# 7. Collecter et compiler les resultats
+pqc> results --output resultats_mlkem768_eu.csv
+  192.168.1.10: 1 ligne(s)
+  192.168.1.11: 1 ligne(s)
+  192.168.1.12: 1 ligne(s)
+  Master CSV: resultats_mlkem768_eu.csv (3 lignes + 4 lignes de synthese)
+```
+
+### Format du master CSV (`results`)
+
+La commande `results` collecte les CSV de toutes les VMs via la socket de controle,
+sauvegarde un fichier individuel par VM dans `results/`, puis compile :
+
+```text
+vm_ip            mode      wan_profile  hs_avg_ms  throughput_mbps  ...
+192.168.1.10     mlkem768  eu           14.2       312.5            ...
+192.168.1.11     mlkem768  eu           13.8       298.1            ...
+192.168.1.12     mlkem768  eu           15.1       321.4            ...
+SUMMARY_AVG (n=3)  mlkem768  eu         14.4       310.7            ...
+SUMMARY_MIN (n=3)  mlkem768  eu         13.8       298.1            ...
+SUMMARY_MAX (n=3)  mlkem768  eu         15.1       321.4            ...
+SUMMARY_STDDEV (n=3) mlkem768 eu        0.552      11.8             ...
+```
+
+Les lignes `SUMMARY_*` permettent de comparer directement les modes entre eux
+(overhead moyen, variabilite inter-VM, meilleur/pire cas).
 
 ---
 
@@ -154,7 +243,7 @@ sudo /opt/pqc/pqc_bench.sh --install
 Selection via `--mode <MODE>` :
 
 | Mode | Echange de cle | Signature | Chiffrement symetrique | Standard |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `classic` | X25519 (ECDHE) | ECDSA P-256 | AES-128-GCM | TLS 1.3 actuel |
 | `mlkem512` | ML-KEM-512 | ECDSA P-256 | AES-128-GCM | FIPS 203 Cat.1 |
 | `mlkem768` | ML-KEM-768 | ECDSA P-256 | AES-256-GCM | FIPS 203 Cat.3 |
@@ -188,7 +277,7 @@ du test**, pas uniquement a T=0.
 5 schedulers independants tournent en parallele :
 
 | Type | Duree session | Pause entre sessions | Delai initial |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `msg` (email/chat) | 5-15s | 8-30s | 0-5s |
 | `web` (navigation) | 8-20s | 5-20s | 0-10s |
 | `file` (transfert) | 15-35s | 30-120s | 0-20s |
@@ -199,28 +288,27 @@ du test**, pas uniquement a T=0.
 
 ## Presets predefinis (`--preset N`)
 
-5 profils PME sur 60 secondes exactement, avec evenements staggeres.  
-A lancer sur des VMs differentes simultanement pour simuler une vraie journee de travail.
+5 profils PME sur 60 secondes exactement, avec evenements staggeres.
 
 ```bash
 # Voir le detail de tous les presets
 python3 traffic_presets.py list
 
-# Executer le preset 3 en mode classique puis PQC (memes donnees = comparaison valide)
+# Executer le preset 3 (identique sur les deux modes = comparaison valide)
 ./pqc_bench.sh --target 10.0.1.1 --mode classic  --preset 3
 ./pqc_bench.sh --target 10.0.1.1 --mode mlkem768 --preset 3
 ```
 
 | Preset | Profil | Trafic |
-|---|---|---|
+| --- | --- | --- |
 | **1 - Secretariat** | Bureautique leger | email x3, web x2, fichier x1 |
-| **2 - Developpeur** | Transferts git, messagerie | file x2 (git push/pull), web x2, msg x2 |
+| **2 - Developpeur** | Transferts git, messagerie | file x2, web x2, msg x2 |
 | **3 - Manager** | Email + reunion video | email x2, web x1, **voip a t=22s** |
 | **4 - Commercial** | Email + meme reunion | email x2, web x1, **voip a t=23s**, fichier x1 |
 | **5 - IT Technicien** | Gros volumes, streaming | file x2, stream x1, web x1, msg x1 |
 
 > Les presets 3 et 4 rejoignent la meme reunion video avec 1s de decalage (t=22s vs t=23s),
-> simulant un acces concurrent au serveur depuis deux postes differents.
+> simulant un acces concurrent depuis deux postes differents.
 
 ---
 
@@ -239,19 +327,18 @@ Le serveur lance :
 ### Profils de latence WAN
 
 | Profil | Delai | Jitter | Perte | Simule |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `fr` | 15ms +/-3ms | faible | 0.05% | Serveur heberge en France |
 | `eu` | 35ms +/-8ms | modere | 0.1% | Serveur en Europe (defaut) |
 | `us` | 80ms +/-15ms | eleve | 0.2% | Serveur aux Etats-Unis |
 
-> Sans cette simulation, les handshakes PQC (cles plus grosses) seraient mesures a <1ms au
-> lieu des 30-80ms reels, faussant completement les ratios overhead/latence.
+> Sans cette simulation, les handshakes PQC seraient mesures a <1ms au lieu des 30-80ms reels.
 
 ---
 
-## Options completes
+## Options completes (pqc_bench.sh)
 
-```
+```text
 --target <IP>         IP du serveur WAN (obligatoire pour les modes test)
 --mode <MODE>         Mode cryptographique (voir tableau ci-dessus)
 --random              Trafic aleatoire continu staggere
@@ -259,10 +346,9 @@ Le serveur lance :
 --profile <PROFILS>   Trafic libre en parallele : web,file,voip,stream,msg,all
 --duration <sec>      Duree en secondes (--random: 0=infini | --profile: defaut 30)
 --hs-count <N>        Iterations pour la mesure de handshake bulk (defaut: 100)
---output <DIR>        Repertoire de sortie CSV (defaut: ./results)
+--output <FILE>       Fichier CSV de sortie
 --wan-profile <p>     Profil latence WAN pour --server : fr | eu | us
 --scan [SUBNET]       Scan reseau (defaut: sous-reseau local /24)
---collect-only [FILE] Agregation des CSV - FILE = fichier texte avec une IP par ligne
 --install             Installe les dependances (sudo requis)
 ```
 
@@ -272,59 +358,49 @@ Le serveur lance :
 
 Les fichiers sont ecrits dans `results/` avec la convention de nommage :
 
-```
-<ip_vm>_<mode>_<timestamp>.csv          # test ponctuel ou preset
-<ip_vm>_<mode>_random_continu_<ts>.csv  # mode --random
-aggregate_<timestamp>.csv               # agregation multi-VM
+```text
+result_<mode>_p<preset>.csv     # mode preset (genere par vm_agent via pqc_bench.sh)
+result_<mode>_r.csv             # mode aleatoire
+results_<ip>.csv                # collecte individuelle par la commande results
+results_master.csv              # master compile par la commande results (defaut)
 ```
 
 | Colonne | Description |
-|---|---|
-| `timestamp` | Horodatage du test (YYYYMMDDTHHmmss) |
-| `vm_ip` | IP de la VM cliente |
-| `target_ip` | IP du serveur WAN |
+| --- | --- |
+| `vm_ip` | IP de la VM cliente (ajoute lors de la compilation master) |
 | `mode` | Mode cryptographique teste |
-| `profile` / `label` | Type de trafic et description de l'evenement |
-| `cipher_suite` | Suite TLS utilisee (AES-128-GCM ou AES-256-GCM) |
-| `aes_bits` | Taille de cle symetrique (128 ou 256) |
-| `latency_min/avg/max/p99_ms` | Statistiques du handshake bulk (100 iterations) |
-| `handshake_event_ms` | Duree du handshake au moment precis de l'evenement |
-| `throughput_mbps` | Debit mesure par iperf3 |
+| `wan_profile` | Profil de latence WAN utilise |
+| `hs_min_ms` / `hs_avg_ms` / `hs_max_ms` / `hs_p99_ms` | Statistiques du handshake (ms) |
 | `cpu_avg_pct` | Utilisation CPU moyenne pendant le test |
 | `ram_avg_mb` | RAM utilisee pendant le test |
-| `retransmit_pct` | Taux de retransmissions TCP |
-| `key_size_bytes` | Taille de la cle privee generee |
-| `cert_size_bytes` | Taille du certificat X.509 |
+| `file_mbps` / `voip_mbps` / `stream_mbps` / `web_mbps` / `msg_mbps` | Debit par profil |
+| `*_retrans_pct` | Taux de retransmissions TCP par profil |
 
 ---
 
 ## Workflow de comparaison PQC vs Classique
 
-Pour des resultats valides et comparables, les tests utilisent les **memes donnees**
-(meme preset, meme duree, meme infrastructure reseau).
+```text
+SERVEUR WAN                              VMs CLIENTES
+-----------                              ------------
+1. pqc_bench.sh --server --mode classic
+2. server_cli.py
+   pqc> scan 192.168.x.0/24
+   pqc> set all --mode classic --preset 2
+   pqc> arm all
+   pqc> launch              ------>      [test lance simultanement sur toutes les VMs]
+   pqc> status              (attente fin du test)
+   pqc> results             <------      [CSV collectes automatiquement]
+   pqc> reset all
 
-```bash
-# ETAPE 1 : Lancer le serveur (un mode a la fois)
-sudo ./pqc_bench.sh --server --mode classic  --wan-profile eu
-# Apres les tests clients, relancer avec le mode suivant :
-sudo ./pqc_bench.sh --server --mode mlkem768 --wan-profile eu
+3. Relancer pqc_bench.sh --server --mode mlkem768
+   pqc> set all --mode mlkem768 --preset 2
+   pqc> arm all
+   pqc> launch
+   pqc> results --output results_mlkem768.csv
 
-# ETAPE 2 : Sur chaque VM cliente, meme preset, modes differents
-./pqc_bench.sh --target 10.0.1.1 --mode classic   --preset 3
-./pqc_bench.sh --target 10.0.1.1 --mode mlkem512  --preset 3
-./pqc_bench.sh --target 10.0.1.1 --mode mlkem768  --preset 3
-./pqc_bench.sh --target 10.0.1.1 --mode mlkem1024 --preset 3
-./pqc_bench.sh --target 10.0.1.1 --mode hybrid    --preset 3
-./pqc_bench.sh --target 10.0.1.1 --mode mldsa44   --preset 3
-./pqc_bench.sh --target 10.0.1.1 --mode mldsa65   --preset 3
-./pqc_bench.sh --target 10.0.1.1 --mode mldsa87   --preset 3
-
-# ETAPE 3 : Collecter et agreger les CSV de toutes les VMs
-echo "10.0.10.1" > vms.txt
-echo "10.0.10.2" >> vms.txt
-echo "10.0.10.3" >> vms.txt
-./pqc_bench.sh --collect-only vms.txt
-# -> results/aggregate_<timestamp>.csv pret pour analyse (Excel, Python, R...)
+# Repeter pour chaque mode : mlkem512, mlkem1024, hybrid, mldsa44, mldsa65, mldsa87
+# Les master CSV resultants contiennent SUMMARY_AVG/MIN/MAX/STDDEV pour comparaison directe
 ```
 
 ---
@@ -332,20 +408,19 @@ echo "10.0.10.3" >> vms.txt
 ## Metriques cles a analyser
 
 | Metrique | Ce qu'elle revele |
-|---|---|
-| `handshake_event_ms` | Overhead direct de PQC vs classique a chaque connexion |
-| `throughput_mbps` | Degradation du debit sous charge crypto |
-| `cpu_avg_pct` | Cout CPU des operations PQC (ML-DSA bien plus lourd que ML-KEM) |
-| `cert_size_bytes` | Impact sur la bande passante (ML-DSA-87 ~5x plus gros qu'ECDSA) |
-| `retransmit_pct` | Stabilite reseau sous charge |
-| `planned_delay_s` | Repartition des connexions dans le temps (visualisation timeline) |
+| --- | --- |
+| `hs_avg_ms` | Overhead direct de PQC vs classique a chaque connexion |
+| `SUMMARY_STDDEV hs_avg` | Variabilite entre VMs (stabilite du test) |
+| `*_mbps` | Degradation du debit sous charge crypto par type de trafic |
+| `cpu_avg_pct` | Cout CPU (ML-DSA bien plus lourd que ML-KEM) |
+| `*_retrans_pct` | Stabilite reseau sous charge |
 
 ---
 
 ## Ports utilises
 
 | Port | Protocole | Usage |
-|---|---|---|
+| --- | --- | --- |
 | 5201 | TCP | iperf3 - transfert fichier |
 | 5202 | UDP | iperf3 - visioconference (bidir) |
 | 5203 | TCP | iperf3 - streaming video |
@@ -353,6 +428,7 @@ echo "10.0.10.3" >> vms.txt
 | 5205 | TCP | iperf3 - messagerie |
 | 5206-5210 | TCP | iperf3 - pool reserve |
 | 8443 | TCP/TLS | Serveur TLS (handshake PQC) |
+| 9998 | TCP | vm_agent - controle par server_cli.py |
 | 9999 | TCP | Port marqueur (detection deploiement par --scan) |
 
 ---
@@ -368,6 +444,10 @@ echo "10.0.10.3" >> vms.txt
 | Resultats trop variables | Augmenter `--hs-count 200` et `--duration 120` |
 | `date +%s%3N` ne fonctionne pas | Verifier GNU date (`apt install coreutils`) |
 | Conflits de port iperf3 | Verifier qu'aucune autre instance ne tourne (`pkill iperf3`) |
+| `scan` ne trouve aucun agent | Verifier que `python3 vm_agent.py` tourne sur les VMs et que le port 9998 est ouvert |
+| VM bloquee en etat `armed` | Utiliser `reset <ip>` puis reconfigurer |
+| `results` retourne "aucun fichier" | Le test n'est peut-etre pas termine (`status` pour verifier) |
+| Lancement non simultane | Verifier la connectivite reseau ; un delai > 500ms indique un probleme |
 
 ---
 

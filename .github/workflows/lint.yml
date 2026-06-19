@@ -43,6 +43,8 @@ jobs:
         run: |
           python3 -m py_compile traffic_gen.py
           python3 -m py_compile traffic_presets.py
+          python3 -m py_compile vm_agent.py
+          python3 -m py_compile server_cli.py
           echo "Syntax OK"
 
   # ─── Verification imports Python ───────────────────────────────────────────
@@ -61,4 +63,6 @@ jobs:
         run: |
           python3 -c "import traffic_gen"
           python3 -c "import traffic_presets"
+          python3 -c "import vm_agent"
+          python3 -c "import server_cli"
           echo "Imports OK"
