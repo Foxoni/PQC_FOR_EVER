@@ -598,11 +598,11 @@ cmd_server() {
         trap '_cleanup_server' EXIT INT TERM
     fi
 
-    # Pool iperf3 serveur — une instance par port (--forking = multi-clients)
+    # Pool iperf3 serveur — une instance par port
     log_info "Démarrage pool iperf3 (ports 5201–5210)..."
     local port
     for port in $(seq 5201 5210); do
-        iperf3 -s -p "$port" --forking \
+        iperf3 -s -p "$port" \
             --logfile "/tmp/iperf3_${port}.log" &
         _SERVER_PIDS+=($!)
     done
