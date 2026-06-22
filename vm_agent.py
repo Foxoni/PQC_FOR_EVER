@@ -14,6 +14,7 @@ import json
 import socket
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 PORT       = 9998
@@ -25,30 +26,45 @@ LOG_TAIL   = 20   # nombre de lignes retournees par STATUS et GET_LOGS
 
 class VMAgent:
     def __init__(self):
-        self._lock   = threading.Lock()
-        self.state   = "idle"
-        self.cfg     = {}
-        self.proc    = None
-        self.outfile = None
-        self.logfile = None
+        self._lock      = threading.Lock()
+        self.state      = "idle"
+        self.cfg        = {}
+        self.proc       = None
+        self.outfile    = None   # trouve apres la fin du test
+        self.logfile    = None
         self.returncode = None
+        self._run_start = 0.0
 
     # ------------------------------------------------------------------ #
     # Handlers                                                             #
     # ------------------------------------------------------------------ #
 
     def _tail(self, n=LOG_TAIL):
-        """Retourne les n dernieres lignes du log courant."""
         if not self.logfile or not Path(self.logfile).exists():
             return []
         lines = Path(self.logfile).read_text(errors="replace").splitlines()
         return lines[-n:]
 
+    def _find_output_csv(self):
+        """Trouve le CSV genere par pqc_bench.sh dans RESULTS apres le debut du test."""
+        mode = self.cfg.get("mode", "")
+        best, best_mtime = None, self._run_start - 1
+        for p in RESULTS.glob("*.csv"):
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if mode in p.name and mtime > self._run_start:
+                if mtime > best_mtime:
+                    best, best_mtime = p, mtime
+        return str(best) if best else None
+
     def _status(self, _req):
         with self._lock:
             if self.proc and self.proc.poll() is not None and self.state == "running":
                 self.returncode = self.proc.returncode
-                self.state = "done"
+                self.outfile    = self._find_output_csv()
+                self.state      = "done"
             return {
                 "ok":          True,
                 "state":       self.state,
@@ -74,10 +90,10 @@ class VMAgent:
             RESULTS.mkdir(exist_ok=True)
             tag          = f"p{self.cfg['preset']}" if self.cfg["preset"] is not None else "r"
             base         = f"{self.cfg['mode']}_{tag}"
-            self.outfile = str(RESULTS / f"result_{base}.csv")
-            self.logfile = str(RESULTS / f"log_{base}.txt")
+            self.outfile    = None
+            self.logfile    = str(RESULTS / f"log_{base}.txt")
             self.returncode = None
-            self.state   = "configured"
+            self.state      = "configured"
             return {"ok": True, "state": self.state, "config": self.cfg}
 
     def _arm(self, _req):
@@ -92,10 +108,11 @@ class VMAgent:
             if self.state != "armed":
                 return {"ok": False, "error": f"etat '{self.state}' invalide pour start"}
 
+            # pqc_bench.sh traite --output comme un DOSSIER, pas un fichier
             cmd = ["bash", str(BENCH), "--test",
                    "--target", self.cfg["target"],
                    "--mode",   self.cfg["mode"],
-                   "--output", self.outfile]
+                   "--output", str(RESULTS)]
             if self.cfg.get("preset") is not None:
                 cmd += ["--preset", str(self.cfg["preset"])]
             if self.cfg.get("wan_profile"):
@@ -103,11 +120,12 @@ class VMAgent:
             if self.cfg.get("duration"):
                 cmd += ["--duration", str(self.cfg["duration"])]
 
+            self._run_start = time.time()
             logfd      = open(self.logfile, "w")
             self.proc  = subprocess.Popen(cmd, cwd=str(SCRIPT_DIR),
                                           stdout=logfd,
                                           stderr=subprocess.STDOUT)
-            logfd.close()   # le fd est duplique par Popen, on peut fermer le handle Python
+            logfd.close()
             self.state = "running"
             pid        = self.proc.pid
 
@@ -116,7 +134,8 @@ class VMAgent:
             with self._lock:
                 if self.state == "running":
                     self.returncode = self.proc.returncode
-                    self.state = "done"
+                    self.outfile    = self._find_output_csv()
+                    self.state      = "done"
 
         threading.Thread(target=_watch, daemon=True).start()
         return {"ok": True, "state": "running", "pid": pid}
@@ -129,6 +148,7 @@ class VMAgent:
             self.outfile    = None
             self.logfile    = None
             self.returncode = None
+            self._run_start = 0.0
             self.cfg        = {}
             self.state      = "idle"
             return {"ok": True, "state": "idle"}
