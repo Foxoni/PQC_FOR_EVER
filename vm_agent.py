@@ -20,6 +20,7 @@ PORT       = 9998
 SCRIPT_DIR = Path(__file__).resolve().parent
 BENCH      = SCRIPT_DIR / "pqc_bench.sh"
 RESULTS    = SCRIPT_DIR / "results"
+LOG_TAIL   = 20   # nombre de lignes retournees par STATUS et GET_LOGS
 
 
 class VMAgent:
@@ -29,20 +30,32 @@ class VMAgent:
         self.cfg     = {}
         self.proc    = None
         self.outfile = None
+        self.logfile = None
+        self.returncode = None
 
     # ------------------------------------------------------------------ #
     # Handlers                                                             #
     # ------------------------------------------------------------------ #
 
+    def _tail(self, n=LOG_TAIL):
+        """Retourne les n dernieres lignes du log courant."""
+        if not self.logfile or not Path(self.logfile).exists():
+            return []
+        lines = Path(self.logfile).read_text(errors="replace").splitlines()
+        return lines[-n:]
+
     def _status(self, _req):
         with self._lock:
             if self.proc and self.proc.poll() is not None and self.state == "running":
+                self.returncode = self.proc.returncode
                 self.state = "done"
             return {
                 "ok":          True,
                 "state":       self.state,
                 "config":      self.cfg,
+                "returncode":  self.returncode,
                 "has_results": bool(self.outfile and Path(self.outfile).exists()),
+                "last_log":    self._tail(5),
             }
 
     def _configure(self, req):
@@ -50,14 +63,20 @@ class VMAgent:
             if self.state == "running":
                 return {"ok": False, "error": "test en cours, impossible de configurer"}
             self.cfg = {
+                "target":      req.get("target"),
                 "preset":      req.get("preset"),
                 "mode":        req.get("mode", "mlkem768"),
                 "wan_profile": req.get("wan_profile", "eu"),
                 "duration":    req.get("duration"),
             }
+            if not self.cfg["target"]:
+                return {"ok": False, "error": "parametre --target manquant (IP du serveur WAN)"}
             RESULTS.mkdir(exist_ok=True)
             tag          = f"p{self.cfg['preset']}" if self.cfg["preset"] is not None else "r"
-            self.outfile = str(RESULTS / f"result_{self.cfg['mode']}_{tag}.csv")
+            base         = f"{self.cfg['mode']}_{tag}"
+            self.outfile = str(RESULTS / f"result_{base}.csv")
+            self.logfile = str(RESULTS / f"log_{base}.txt")
+            self.returncode = None
             self.state   = "configured"
             return {"ok": True, "state": self.state, "config": self.cfg}
 
@@ -74,7 +93,8 @@ class VMAgent:
                 return {"ok": False, "error": f"etat '{self.state}' invalide pour start"}
 
             cmd = ["bash", str(BENCH), "--test",
-                   "--mode", self.cfg["mode"],
+                   "--target", self.cfg["target"],
+                   "--mode",   self.cfg["mode"],
                    "--output", self.outfile]
             if self.cfg.get("preset") is not None:
                 cmd += ["--preset", str(self.cfg["preset"])]
@@ -83,9 +103,11 @@ class VMAgent:
             if self.cfg.get("duration"):
                 cmd += ["--duration", str(self.cfg["duration"])]
 
+            logfd      = open(self.logfile, "w")
             self.proc  = subprocess.Popen(cmd, cwd=str(SCRIPT_DIR),
-                                          stdout=subprocess.DEVNULL,
-                                          stderr=subprocess.DEVNULL)
+                                          stdout=logfd,
+                                          stderr=subprocess.STDOUT)
+            logfd.close()   # le fd est duplique par Popen, on peut fermer le handle Python
             self.state = "running"
             pid        = self.proc.pid
 
@@ -93,6 +115,7 @@ class VMAgent:
             self.proc.wait()
             with self._lock:
                 if self.state == "running":
+                    self.returncode = self.proc.returncode
                     self.state = "done"
 
         threading.Thread(target=_watch, daemon=True).start()
@@ -102,10 +125,12 @@ class VMAgent:
         with self._lock:
             if self.proc and self.proc.poll() is None:
                 self.proc.terminate()
-            self.proc    = None
-            self.outfile = None
-            self.cfg     = {}
-            self.state   = "idle"
+            self.proc       = None
+            self.outfile    = None
+            self.logfile    = None
+            self.returncode = None
+            self.cfg        = {}
+            self.state      = "idle"
             return {"ok": True, "state": "idle"}
 
     def _get_results(self, _req):
@@ -114,6 +139,19 @@ class VMAgent:
             return {"ok": False, "error": "aucun fichier de resultats"}
         return {"ok": True, "content": Path(path).read_text(), "file": path}
 
+    def _get_logs(self, req):
+        if not self.logfile or not Path(self.logfile).exists():
+            return {"ok": False, "error": "aucun fichier de log"}
+        n    = int(req.get("lines", 50))
+        tail = self._tail(n)
+        return {
+            "ok":         True,
+            "log":        "\n".join(tail),
+            "file":       self.logfile,
+            "returncode": self.returncode,
+            "state":      self.state,
+        }
+
     _DISPATCH = {
         "STATUS":      _status,
         "CONFIGURE":   _configure,
@@ -121,6 +159,7 @@ class VMAgent:
         "START":       _start,
         "RESET":       _reset,
         "GET_RESULTS": _get_results,
+        "GET_LOGS":    _get_logs,
     }
 
     # ------------------------------------------------------------------ #

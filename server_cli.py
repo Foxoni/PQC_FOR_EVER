@@ -123,16 +123,16 @@ class ServerCLI:
         print()
 
     def cmd_set(self, args):
-        """set <ip|all> --mode MODE [--preset N] [--wan-profile WAN] [--duration D]"""
+        """set <ip|all> --mode MODE --target IP [--preset N] [--wan-profile WAN] [--duration D]"""
         if not args:
-            print("Usage: set <ip|all> --mode MODE [--preset N] [--wan-profile eu] [--duration 60]")
+            print("Usage: set <ip|all> --mode MODE --target IP [--preset N] [--wan-profile eu] [--duration 60]")
             return
 
         target = args[0]
         cfg, i = {}, 1
         while i < len(args):
             flag = args[i]
-            if flag in ("--preset", "--mode", "--wan-profile", "--duration") and i + 1 < len(args):
+            if flag in ("--preset", "--mode", "--wan-profile", "--duration", "--target") and i + 1 < len(args):
                 key      = flag.lstrip("-").replace("-", "_")
                 raw      = args[i + 1]
                 cfg[key] = int(raw) if key in ("preset", "duration") else raw
@@ -142,6 +142,8 @@ class ServerCLI:
 
         if "mode" not in cfg:
             print("--mode requis"); return
+        if "target" not in cfg:
+            print("--target requis (IP du serveur WAN)"); return
 
         targets = sorted(self.vms) if target == "all" else [target]
         for ip in targets:
@@ -227,9 +229,36 @@ class ServerCLI:
                 vm = self.vms.setdefault(ip, VM(ip))
                 vm.state  = r["state"]
                 vm.config = r.get("config", vm.config)
-                print(f"  {ip}: {r['state']}  {r.get('config', {})}")
+                rc        = r.get("returncode")
+                rc_str    = f"  rc={rc}" if rc is not None else ""
+                print(f"  {ip}: {r['state']}{rc_str}  {r.get('config', {})}")
+                if r.get("last_log"):
+                    for line in r["last_log"]:
+                        print(f"    | {line}")
             else:
                 print(f"  {ip}: injoignable — {r.get('error')}")
+
+    def cmd_logs(self, args):
+        """logs [<ip>|all] [--lines N]"""
+        n       = 50
+        if "--lines" in args:
+            idx = args.index("--lines")
+            if idx + 1 < len(args):
+                n = int(args[idx + 1])
+            args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
+
+        target  = args[0] if args else "all"
+        targets = sorted(self.vms) if target == "all" else [target]
+        for ip in targets:
+            r = self._send(ip, {"cmd": "GET_LOGS", "lines": n}, timeout=10)
+            print(f"\n{'='*60}")
+            print(f"  {ip}  etat={r.get('state', '?')}  rc={r.get('returncode', '?')}")
+            print(f"{'='*60}")
+            if r.get("ok"):
+                print(r.get("log", "(vide)"))
+            else:
+                print(f"  ERREUR: {r.get('error')}")
+        print()
 
     def cmd_reset(self, args):
         target  = args[0] if args else "all"
@@ -337,16 +366,17 @@ class ServerCLI:
 
     def cmd_help(self, _args):
         print("""
-  scan [subnet]                                   Decouverte des agents (ex: 192.168.1.0/24)
-  list                                            Tableau des VMs et leur etat
-  set <ip|all> --mode MODE [--preset N] [...]     Configure une ou toutes les VMs
-  arm [all|<ip>]                                  Met les VMs configurees en standby
-  launch                                          Lance toutes les VMs armed simultanement
-  status [all|<ip>]                               Poll l'etat des VMs
-  reset [all|<ip>]                                Remet en idle (kill si en cours)
-  results [--output FILE]                         Collecte et compile les CSV en master
-  help                                            Cette aide
-  exit / quit                                     Quitte le CLI
+  scan [subnet]                                              Decouverte des agents (ex: 192.168.1.0/24)
+  list                                                       Tableau des VMs et leur etat
+  set <ip|all> --mode MODE --target IP [--preset N] [...]   Configure une ou toutes les VMs
+  arm [all|<ip>]                                             Met les VMs configurees en standby
+  launch                                                     Lance toutes les VMs armed simultanement
+  status [all|<ip>]                                          Poll l'etat + derniers logs
+  logs [all|<ip>] [--lines N]                                Affiche les logs de pqc_bench.sh (defaut 50 lignes)
+  reset [all|<ip>]                                           Remet en idle (kill si en cours)
+  results [--output FILE]                                    Collecte et compile les CSV en master
+  help                                                       Cette aide
+  exit / quit                                                Quitte le CLI
 """)
 
     _CMDS = {
@@ -356,6 +386,7 @@ class ServerCLI:
         "arm":     cmd_arm,
         "launch":  cmd_launch,
         "status":  cmd_status,
+        "logs":    cmd_logs,
         "reset":   cmd_reset,
         "results": cmd_results,
         "help":    cmd_help,

@@ -20,19 +20,29 @@ Ce projet le mesure.
 
 ---
 
-## Architecture des fichiers
+## Architecture
+
+Le banc de test repose sur deux roles :
+
+- **Serveur WAN** : simule un serveur internet distant avec latence artificielle (tc-netem).
+  Lance `pqc_bench.sh --server` pour accepter les connexions TLS et iperf3,
+  et `server_cli.py` pour orchestrer les VMs clientes depuis un CLI interactif.
+
+- **VMs clientes** : chaque VM execute `vm_agent.py` (daemon TCP port 9998) qui attend les
+  ordres du serveur. Sur signal, elle lance `pqc_bench.sh` et mesure les performances vers
+  le serveur WAN.
+
+### Fichiers
 
 ```text
 pqc_bench/
 ├── pqc_bench.sh          # Moteur de test - generation certificats, handshake, trafic
 ├── traffic_gen.py        # Module utilitaire (stats, monitoring CPU/RAM, CSV)
 ├── traffic_presets.py    # Generateur de trafic - presets + mode continu aleatoire
-├── vm_agent.py           # Daemon de controle sur chaque VM de test (port 9998)
+├── vm_agent.py           # Daemon de controle sur chaque VM cliente (port 9998)
 ├── server_cli.py         # CLI central sur le serveur - orchestre toutes les VMs
 └── results/              # Fichiers CSV produits (cree automatiquement)
 ```
-
-### Role de chaque fichier
 
 | Fichier | Role |
 | --- | --- |
@@ -41,33 +51,6 @@ pqc_bench/
 | `traffic_presets.py` | 5 presets PME predefinis + mode aleatoire continu, handshake TLS par connexion |
 | `vm_agent.py` | Daemon TCP sur chaque VM cliente : recoit les ordres du serveur, lance pqc_bench.sh |
 | `server_cli.py` | CLI interactif sur le serveur WAN : scan, configuration, lancement synchronise, collecte |
-
----
-
-## Topologie reseau cible
-
-```text
-                    [ Internet / WAN ]
-                           |
-                        [ R2 ] <- Routeur
-                           |
-                      [ Pare-feu ]
-                           |
-             [ VM Serveur WAN ] <- --server + server_cli.py
-                           |
-                       [ ESW2 ] <- Switch central
-                    /    |     \
-              [ESW1]  [WiFi]  [ESW3]
-             VLAN 10  VLAN 20  VLAN 30
-          PC1 PC2 PC3  Laptop  Serveur
-                        Mobile
-         (vm_agent.py tourne sur chaque VM cliente)
-```
-
-- **VM Serveur WAN** : unique cible de toutes les VMs clientes, simule un serveur internet
-  avec latence WAN artificielle via tc-netem. Heberge aussi `server_cli.py`.
-- **VMs clientes** : PC1, PC2, PC3, Laptop, Mobile - executent `vm_agent.py` en attente
-  d'ordres, puis lancent `pqc_bench.sh` sur commande du serveur.
 
 ---
 
@@ -109,35 +92,32 @@ openssl list -providers | grep oqs
 
 ---
 
-## Deploiement sur la topologie
+## Deploiement
 
-### 1. VM Serveur WAN
+### Sur toutes les machines (serveur et clients)
 
 ```bash
-# Copier tous les scripts
-scp pqc_bench.sh traffic_gen.py traffic_presets.py \
-    vm_agent.py server_cli.py user@server_wan:/opt/pqc/
-
-# Installer les dependances (une seule fois)
-sudo /opt/pqc/pqc_bench.sh --install
-
-# Lancer le serveur de trafic (doit tourner avant les clients)
-sudo /opt/pqc/pqc_bench.sh --server --mode mlkem768 --wan-profile eu
-
-# Dans un second terminal : lancer le CLI de controle
-python3 /opt/pqc/server_cli.py --subnet 192.168.1.0/24
+git clone https://github.com/Foxoni/PQC_FOR_EVER.git
+cd PQC_FOR_EVER
+chmod +x pqc_bench.sh
+sudo ./pqc_bench.sh --install
 ```
 
-### 2. VMs clientes (repeter sur chaque VM)
+### Sur le serveur WAN
 
 ```bash
-scp pqc_bench.sh traffic_gen.py traffic_presets.py \
-    vm_agent.py user@pc1:/opt/pqc/
+# Terminal 1 : lancer le serveur de trafic
+sudo ./pqc_bench.sh --server --mode mlkem768 --wan-profile eu
 
-sudo /opt/pqc/pqc_bench.sh --install
+# Terminal 2 : lancer le CLI de controle
+python3 server_cli.py --subnet 192.168.x.0/24
+```
 
+### Sur chaque VM cliente
+
+```bash
 # Lancer le daemon de controle (reste en arriere-plan)
-python3 /opt/pqc/vm_agent.py
+python3 vm_agent.py
 ```
 
 ---
@@ -159,10 +139,11 @@ pqc>
 | --- | --- |
 | `scan [subnet]` | Scan parallele du sous-reseau, detecte les agents actifs et leur etat |
 | `list` | Tableau : IP, etat, preset, mode, WAN, derniere vue |
-| `set <ip\|all> --mode MODE [--preset N] [--wan-profile WAN] [--duration D]` | Configure une ou toutes les VMs (sans lancer) |
+| `set <ip\|all> --mode MODE --target IP [--preset N] [--wan-profile WAN] [--duration D]` | Configure une ou toutes les VMs (sans lancer) |
 | `arm [all\|<ip>]` | Met les VMs configurees en standby (pretes a demarrer) |
 | `launch` | Envoie START a toutes les VMs armed **simultanement** |
-| `status [all\|<ip>]` | Poll l'etat actuel (idle / configured / armed / running / done) |
+| `status [all\|<ip>]` | Poll l'etat + 5 dernieres lignes de log + code de retour |
+| `logs [all\|<ip>] [--lines N]` | Affiche le log complet de pqc_bench.sh sur la VM (defaut 50 lignes) |
 | `reset [all\|<ip>]` | Remet en idle, kill le test si en cours |
 | `results [--output FILE]` | Collecte les CSV de toutes les VMs et compile un master CSV |
 | `help` | Liste des commandes |
@@ -185,13 +166,14 @@ pqc> scan 192.168.1.0/24
   192.168.1.11   [idle]
   192.168.1.12   [idle]
 
-# 2. Configurer toutes les VMs (pas de lancement immediat)
-pqc> set all --mode mlkem768 --preset 2 --wan-profile eu
+# 2. Configurer toutes les VMs
+#    --target : IP du serveur WAN (vers lequel les clients vont se connecter)
+pqc> set all --mode mlkem768 --preset 2 --target 192.168.1.1 --wan-profile eu
 
 # 3. Ou configurer chaque VM individuellement avec un preset different
-pqc> set 192.168.1.10 --mode mlkem768 --preset 1   # Secretariat
-pqc> set 192.168.1.11 --mode mlkem768 --preset 3   # Manager
-pqc> set 192.168.1.12 --mode mlkem768 --preset 5   # IT Technicien
+pqc> set 192.168.1.10 --mode mlkem768 --preset 1 --target 192.168.1.1
+pqc> set 192.168.1.11 --mode mlkem768 --preset 3 --target 192.168.1.1
+pqc> set 192.168.1.12 --mode mlkem768 --preset 5 --target 192.168.1.1
 
 # 4. Mettre toutes les VMs en standby
 pqc> arm all
@@ -203,13 +185,17 @@ pqc> launch
   192.168.1.11: demarre (pid 1235)
   192.168.1.12: demarre (pid 1236)
 
-# 6. Surveiller l'avancement
+# 6. Surveiller l'avancement (affiche aussi les derniers logs)
 pqc> status
-  192.168.1.10: running  ...
-  192.168.1.11: done
-  192.168.1.12: running  ...
+  192.168.1.10: running  {'mode': 'mlkem768', 'preset': 2, ...}
+    | [INFO] Handshake #42/100...
+  192.168.1.11: done  rc=0
+    | [OK] CSV ecrit : results/result_mlkem768_p2.csv
 
-# 7. Collecter et compiler les resultats
+# 7. En cas de probleme, consulter les logs complets
+pqc> logs 192.168.1.10 --lines 30
+
+# 8. Collecter et compiler les resultats
 pqc> results --output resultats_mlkem768_eu.csv
   192.168.1.10: 1 ligne(s)
   192.168.1.11: 1 ligne(s)
@@ -223,14 +209,14 @@ La commande `results` collecte les CSV de toutes les VMs via la socket de contro
 sauvegarde un fichier individuel par VM dans `results/`, puis compile :
 
 ```text
-vm_ip            mode      wan_profile  hs_avg_ms  throughput_mbps  ...
-192.168.1.10     mlkem768  eu           14.2       312.5            ...
-192.168.1.11     mlkem768  eu           13.8       298.1            ...
-192.168.1.12     mlkem768  eu           15.1       321.4            ...
-SUMMARY_AVG (n=3)  mlkem768  eu         14.4       310.7            ...
-SUMMARY_MIN (n=3)  mlkem768  eu         13.8       298.1            ...
-SUMMARY_MAX (n=3)  mlkem768  eu         15.1       321.4            ...
-SUMMARY_STDDEV (n=3) mlkem768 eu        0.552      11.8             ...
+vm_ip              mode      wan_profile  hs_avg_ms  throughput_mbps  ...
+192.168.1.10       mlkem768  eu           14.2       312.5            ...
+192.168.1.11       mlkem768  eu           13.8       298.1            ...
+192.168.1.12       mlkem768  eu           15.1       321.4            ...
+SUMMARY_AVG (n=3)  mlkem768  eu           14.4       310.7            ...
+SUMMARY_MIN (n=3)  mlkem768  eu           13.8       298.1            ...
+SUMMARY_MAX (n=3)  mlkem768  eu           15.1       321.4            ...
+SUMMARY_STDDEV (n=3) mlkem768 eu          0.552      11.8             ...
 ```
 
 Les lignes `SUMMARY_*` permettent de comparer directement les modes entre eux
@@ -320,7 +306,7 @@ sudo ./pqc_bench.sh --server --mode mlkem768 --wan-profile eu
 
 Le serveur lance :
 
-- Un pool de 10 instances iperf3 (ports 5201-5210, `--forking` pour multi-clients)
+- Un pool de 10 instances iperf3 (ports 5201-5210, une instance dediee par port)
 - Un serveur TLS en boucle (port 8443) avec le bon mode cryptographique
 - La simulation de latence WAN via `tc-netem`
 
@@ -361,7 +347,8 @@ Les fichiers sont ecrits dans `results/` avec la convention de nommage :
 ```text
 result_<mode>_p<preset>.csv     # mode preset (genere par vm_agent via pqc_bench.sh)
 result_<mode>_r.csv             # mode aleatoire
-results_<ip>.csv                # collecte individuelle par la commande results
+log_<mode>_p<preset>.txt        # log de pqc_bench.sh (accessible via commande logs)
+result_<ip>.csv                 # collecte individuelle par la commande results
 results_master.csv              # master compile par la commande results (defaut)
 ```
 
@@ -381,20 +368,21 @@ results_master.csv              # master compile par la commande results (defaut
 ## Workflow de comparaison PQC vs Classique
 
 ```text
-SERVEUR WAN                              VMs CLIENTES
------------                              ------------
+SERVEUR WAN                                        VMs CLIENTES
+-----------                                        ------------
 1. pqc_bench.sh --server --mode classic
+
 2. server_cli.py
    pqc> scan 192.168.x.0/24
-   pqc> set all --mode classic --preset 2
+   pqc> set all --mode classic --preset 2 --target 192.168.x.1
    pqc> arm all
-   pqc> launch              ------>      [test lance simultanement sur toutes les VMs]
-   pqc> status              (attente fin du test)
-   pqc> results             <------      [CSV collectes automatiquement]
+   pqc> launch              ------>   [test lance simultanement sur toutes les VMs]
+   pqc> status              (attente fin du test, logs visibles en cas d'erreur)
+   pqc> results             <------   [CSV collectes automatiquement]
    pqc> reset all
 
 3. Relancer pqc_bench.sh --server --mode mlkem768
-   pqc> set all --mode mlkem768 --preset 2
+   pqc> set all --mode mlkem768 --preset 2 --target 192.168.x.1
    pqc> arm all
    pqc> launch
    pqc> results --output results_mlkem768.csv
@@ -437,6 +425,8 @@ SERVEUR WAN                              VMs CLIENTES
 
 | Probleme | Solution |
 | --- | --- |
+| `Permission denied` apres `git clone` ou `git pull` | `chmod +x pqc_bench.sh` (voir ci-dessous) |
+| `sudo: 'pqc_bench.sh': command not found` | Utiliser `sudo ./pqc_bench.sh` (le `./` est obligatoire) |
 | `oqsprovider not found` | Relancer `sudo ./pqc_bench.sh --install` |
 | `iperf3: connect failed` | Verifier que le serveur tourne et les ports 5201-5210 sont ouverts |
 | `openssl s_client: handshake failure` | Le mode du client et du serveur doivent correspondre |
@@ -444,10 +434,33 @@ SERVEUR WAN                              VMs CLIENTES
 | Resultats trop variables | Augmenter `--hs-count 200` et `--duration 120` |
 | `date +%s%3N` ne fonctionne pas | Verifier GNU date (`apt install coreutils`) |
 | Conflits de port iperf3 | Verifier qu'aucune autre instance ne tourne (`pkill iperf3`) |
+| Le serveur boucle apres Ctrl+C + relance | `sudo pkill -f "openssl s_server"; sudo pkill -f "iperf3 -s"` |
 | `scan` ne trouve aucun agent | Verifier que `python3 vm_agent.py` tourne sur les VMs et que le port 9998 est ouvert |
 | VM bloquee en etat `armed` | Utiliser `reset <ip>` puis reconfigurer |
 | `results` retourne "aucun fichier" | Le test n'est peut-etre pas termine (`status` pour verifier) |
 | Lancement non simultane | Verifier la connectivite reseau ; un delai > 500ms indique un probleme |
+| Test se termine immediatement (etat `done` en quelques secondes) | Utiliser `logs <ip>` pour voir l'erreur dans pqc_bench.sh |
+| `--target manquant` lors du `set` | Ajouter `--target <IP_serveur_WAN>` a la commande set |
+
+### Permissions apres git clone / git pull
+
+Sur Linux, les fichiers `.sh` clones depuis Windows n'ont pas le bit executable.
+A lancer une seule fois apres chaque clone ou pull :
+
+```bash
+chmod +x pqc_bench.sh
+```
+
+Pour ne plus avoir a le refaire apres un `git pull`, il est possible de configurer git
+pour ignorer le mode des fichiers localement :
+
+```bash
+git config core.fileMode false
+```
+
+> Note : cela desactive uniquement la detection locale des changements de permissions,
+> les permissions sur la VM restent inchangees apres un pull suivant.
+> Il faudra relancer `chmod +x pqc_bench.sh` si le fichier est remplace par un pull.
 
 ---
 
