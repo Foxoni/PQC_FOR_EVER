@@ -579,6 +579,10 @@ _cleanup_server() {
     for pid in "${_SERVER_PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
+    # openssl s_server tourne dans un subshell et peut survivre au kill du parent
+    pkill -f "openssl s_server" 2>/dev/null || true
+    pkill -f "iperf3 -s"        2>/dev/null || true
+    sleep 0.3
     [[ $EUID -eq 0 ]] && wan_remove
     rm -rf "$CERT_DIR"
 }
