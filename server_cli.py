@@ -32,10 +32,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-AGENT_PORT   = 9998
-RESULTS_DIR  = Path("results")
-SCAN_WORKERS = 64
-SCAN_TIMEOUT = 0.5
+AGENT_PORT       = 9998
+RESULTS_DIR      = Path("results")
+SCAN_WORKERS     = 64
+SCAN_TIMEOUT     = 0.5
+SERVER_MODE_FILE = Path(__file__).resolve().parent / ".server_mode"
 
 
 class VM:
@@ -122,10 +123,17 @@ class ServerCLI:
                   f"  {vm.last_seen or '-'}")
         print()
 
+    def _server_mode(self):
+        """Lit le mode du serveur depuis le fichier d'etat ecrit par pqc_bench.sh --server."""
+        try:
+            return SERVER_MODE_FILE.read_text().strip() or None
+        except OSError:
+            return None
+
     def cmd_set(self, args):
-        """set <ip|all> --mode MODE --target IP [--preset N] [--wan-profile WAN] [--duration D]"""
+        """set <ip|all> --target IP [--mode MODE] [--preset N] [--wan-profile WAN] [--duration D]"""
         if not args:
-            print("Usage: set <ip|all> --mode MODE --target IP [--preset N] [--wan-profile eu] [--duration 60]")
+            print("Usage: set <ip|all> --target IP [--mode MODE] [--preset N] [--wan-profile eu] [--duration 60]")
             return
 
         target = args[0]
@@ -140,10 +148,20 @@ class ServerCLI:
             else:
                 i += 1
 
+        # Auto-detection du mode depuis le serveur
+        server_mode = self._server_mode()
         if "mode" not in cfg:
-            print("--mode requis"); return
+            if not server_mode:
+                print("ERREUR: --mode requis (serveur non demarre ou .server_mode introuvable)"); return
+            cfg["mode"] = server_mode
+            print(f"  [mode auto depuis serveur: {server_mode}]")
+        elif server_mode and cfg["mode"] != server_mode:
+            print(f"ERREUR: mode '{cfg['mode']}' != mode du serveur '{server_mode}'")
+            print(f"  Relancez le serveur avec --mode {cfg['mode']} ou omettez --mode pour utiliser '{server_mode}'")
+            return
+
         if "target" not in cfg:
-            print("--target requis (IP du serveur WAN)"); return
+            print("ERREUR: --target requis (IP du serveur WAN)"); return
 
         targets = sorted(self.vms) if target == "all" else [target]
         for ip in targets:
@@ -269,17 +287,115 @@ class ServerCLI:
             if r.get("ok"):
                 self.vms.setdefault(ip, VM(ip)).state = "idle"
 
+    # Colonnes numeriques des CSV bruts produits par pqc_bench.sh
+    _NUM_COLS = (
+        "Handshake_ms", "Debit_Mbps", "CPU_moy_pct",
+        "RAM_moy_Mo", "Retransmissions_pct",
+        "Duree_reelle_s", "Delai_planifie_s",
+        # noms anciens (compat)
+        "handshake_event_ms", "throughput_mbps", "cpu_avg_pct",
+        "ram_avg_mb", "retransmit_pct",
+    )
+    _MASTER_FIELDS = [
+        "Source", "Mode", "Type_test", "WAN",
+        "Handshake_moy_ms", "Handshake_min_ms", "Handshake_max_ms",
+        "Debit_moy_Mbps", "Debit_min_Mbps", "Debit_max_Mbps",
+        "CPU_moy_pct", "RAM_moy_Mo", "Retransmissions_moy_pct",
+        "Nb_evenements",
+    ]
+
+    def _next_master_index(self, mode):
+        """Retourne le prochain indice disponible pour master_<mode>_N.csv."""
+        nums = []
+        for p in RESULTS_DIR.glob(f"master_{mode}_*.csv"):
+            try:
+                nums.append(int(p.stem.rsplit("_", 1)[-1]))
+            except ValueError:
+                pass
+        return max(nums, default=0) + 1
+
+    def _summarise_vm_rows(self, rows):
+        """Reduit les lignes par evenement d'une VM en stats aggregees."""
+        def _col(name, alt=None):
+            vals = []
+            for r in rows:
+                raw = r.get(name) or (r.get(alt) if alt else None)
+                try:
+                    v = float(raw)
+                    if v >= 0:      # exclut -1 (mesure ratee)
+                        vals.append(v)
+                except (TypeError, ValueError):
+                    pass
+            return vals
+
+        hs   = _col("Handshake_ms", "handshake_event_ms")
+        dbt  = _col("Debit_Mbps",   "throughput_mbps")
+        cpu  = _col("CPU_moy_pct",  "cpu_avg_pct")
+        ram  = _col("RAM_moy_Mo",   "ram_avg_mb")
+        rtr  = _col("Retransmissions_pct", "retransmit_pct")
+
+        def avg(v): return round(statistics.mean(v), 3) if v else ""
+        def mn(v):  return round(min(v), 3)             if v else ""
+        def mx(v):  return round(max(v), 3)             if v else ""
+
+        # Mode et Type_test : premier enregistrement
+        first = rows[0] if rows else {}
+        mode  = first.get("Mode") or first.get("mode", "?")
+        ttype = first.get("Type_test") or first.get("schedule", "?")
+
+        return {
+            "Mode": mode, "Type_test": ttype,
+            "Handshake_moy_ms": avg(hs), "Handshake_min_ms": mn(hs), "Handshake_max_ms": mx(hs),
+            "Debit_moy_Mbps":   avg(dbt), "Debit_min_Mbps": mn(dbt), "Debit_max_Mbps": mx(dbt),
+            "CPU_moy_pct":   avg(cpu),
+            "RAM_moy_Mo":    avg(ram),
+            "Retransmissions_moy_pct": avg(rtr),
+            "Nb_evenements": len(rows),
+        }
+
+    def _global_rows(self, vm_summaries, mode, wan, n_vms):
+        """Produit les lignes GLOBAL_* a partir des resumes par VM."""
+        num_keys = [
+            "Handshake_moy_ms", "Handshake_min_ms", "Handshake_max_ms",
+            "Debit_moy_Mbps", "Debit_min_Mbps", "Debit_max_Mbps",
+            "CPU_moy_pct", "RAM_moy_Mo", "Retransmissions_moy_pct",
+        ]
+        def _vals(key):
+            out = []
+            for s in vm_summaries:
+                try:
+                    out.append(float(s[key]))
+                except (TypeError, ValueError, KeyError):
+                    pass
+            return out
+
+        rows = []
+        for label, fn in [
+            (f"GLOBAL_MOY (n={n_vms} VMs)", statistics.mean),
+            (f"GLOBAL_MIN",                  min),
+            (f"GLOBAL_MAX",                  max),
+        ]:
+            r = {"Source": label, "Mode": mode, "Type_test": "-", "WAN": wan, "Nb_evenements": "-"}
+            for k in num_keys:
+                v = _vals(k)
+                r[k] = round(fn(v), 3) if v else ""
+            rows.append(r)
+
+        if n_vms > 1:
+            r = {"Source": f"GLOBAL_ECART_TYPE (n={n_vms} VMs)", "Mode": mode, "Type_test": "-", "WAN": wan, "Nb_evenements": "-"}
+            for k in num_keys:
+                v = _vals(k)
+                r[k] = round(statistics.stdev(v), 3) if len(v) > 1 else ""
+            rows.append(r)
+        return rows
+
     def cmd_results(self, args):
         RESULTS_DIR.mkdir(exist_ok=True)
-        outfile = "results_master.csv"
-        if "--output" in args:
-            idx = args.index("--output")
-            if idx + 1 < len(args):
-                outfile = args[idx + 1]
 
-        all_rows   = []
-        fieldnames = []
-        errors     = []
+        vm_data = {}   # ip -> list of row dicts
+        errors  = []
+        mode    = "unknown"
+        wan     = "?"
 
         print("Collecte des resultats...")
         for ip in sorted(self.vms):
@@ -293,76 +409,91 @@ class ServerCLI:
             if not content:
                 print(f"  {ip}: CSV vide"); continue
 
-            (RESULTS_DIR / f"result_{ip.replace('.', '_')}.csv").write_text(content)
+            # Sauvegarde individuelle avec timestamp pour ne pas ecraser
+            ts_tag  = datetime.now().strftime("%Y%m%dT%H%M%S")
+            indiv   = RESULTS_DIR / f"raw_{ip.replace('.', '_')}_{ts_tag}.csv"
+            indiv.write_text(content)
 
-            reader = csv.DictReader(io.StringIO(content))
-            rows   = list(reader)
+            rows = list(csv.DictReader(io.StringIO(content)))
             if not rows:
                 print(f"  {ip}: aucune donnee"); continue
 
-            if not fieldnames:
-                fieldnames = list(reader.fieldnames or [])
-            for row in rows:
-                row["vm_ip"] = ip
-            all_rows.extend(rows)
-            print(f"  {ip}: {len(rows)} ligne(s)")
+            vm_data[ip] = rows
+            # Recupere mode et wan depuis la config connue
+            vm_mode = self.vms[ip].config.get("mode") or rows[0].get("Mode") or rows[0].get("mode", "unknown")
+            vm_wan  = self.vms[ip].config.get("wan_profile", "?")
+            if vm_mode != "unknown":
+                mode = vm_mode
+            if vm_wan != "?":
+                wan = vm_wan
+            print(f"  {ip}: {len(rows)} evenement(s) [{vm_mode}]")
 
-        if not all_rows:
+        if not vm_data:
             print("Aucune donnee collectee."); return
 
-        summary = self._make_summary(all_rows, fieldnames)
+        # Ligne resumee par VM
+        master_rows = []
+        vm_summaries = []
+        for ip, rows in sorted(vm_data.items()):
+            s = self._summarise_vm_rows(rows)
+            s["Source"] = ip
+            s["WAN"]    = self.vms[ip].config.get("wan_profile", "?")
+            master_rows.append(s)
+            vm_summaries.append(s)
+
+        # Lignes globales
+        master_rows += self._global_rows(vm_summaries, mode, wan, len(vm_summaries))
+
+        # Nommage avec auto-increment
+        idx     = self._next_master_index(mode)
+        outfile = RESULTS_DIR / f"master_{mode}_{idx}.csv"
 
         with open(outfile, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["vm_ip"] + fieldnames, extrasaction="ignore")
+            w = csv.DictWriter(f, fieldnames=self._MASTER_FIELDS, extrasaction="ignore")
             w.writeheader()
-            w.writerows(all_rows)
-            w.writerows(summary)
+            w.writerows(master_rows)
 
         print(f"\nMaster CSV: {outfile}")
-        print(f"  {len(all_rows)} ligne(s) individuelle(s), {len(summary)} ligne(s) de synthese")
+        print(f"  {len(vm_data)} VM(s), {len(vm_summaries)} ligne(s) VM + lignes GLOBAL")
         if errors:
             print(f"  VMs sans resultats: {', '.join(errors)}")
 
-    def _make_summary(self, rows, fieldnames):
-        """Calcule des lignes de synthese globale par (mode, wan_profile)."""
-        num_fields = [f for f in fieldnames if f not in ("mode", "wan_profile")]
+    def cmd_compare(self, args):
+        """compare [--output FILE]  Compile tous les master CSV en comparatif inter-modes."""
+        RESULTS_DIR.mkdir(exist_ok=True)
+        outfile = RESULTS_DIR / f"compare_{datetime.now().strftime('%Y%m%dT%H%M%S')}.csv"
+        if "--output" in args:
+            idx = args.index("--output")
+            if idx + 1 < len(args):
+                outfile = Path(args[idx + 1])
 
-        def _vals(grp, field):
-            out = []
-            for r in grp:
-                try:
-                    out.append(float(r[field]))
-                except (ValueError, KeyError, TypeError):
-                    pass
-            return out
+        masters = sorted(RESULTS_DIR.glob("master_*.csv"))
+        if not masters:
+            print("Aucun master CSV trouve dans results/."); return
 
-        groups = defaultdict(list)
-        for row in rows:
-            groups[(row.get("mode", "?"), row.get("wan_profile", "?"))].append(row)
+        # Extrait les lignes GLOBAL_MOY de chaque master
+        compare_rows = []
+        for mpath in masters:
+            try:
+                rows = list(csv.DictReader(open(mpath)))
+            except OSError:
+                continue
+            for row in rows:
+                src = row.get("Source", "")
+                if src.startswith("GLOBAL_MOY"):
+                    row["Fichier"] = mpath.name
+                    compare_rows.append(row)
 
-        summary = []
-        for (mode, wan), grp in sorted(groups.items()):
-            n = len(grp)
+        if not compare_rows:
+            print("Aucune ligne GLOBAL_MOY trouvee dans les master CSV."); return
 
-            for label, fn in [
-                (f"SUMMARY_AVG (n={n})",   statistics.mean),
-                (f"SUMMARY_MIN (n={n})",   min),
-                (f"SUMMARY_MAX (n={n})",   max),
-            ]:
-                srow = {"vm_ip": label, "mode": mode, "wan_profile": wan}
-                for f in num_fields:
-                    v = _vals(grp, f)
-                    srow[f] = round(fn(v), 3) if v else ""
-                summary.append(srow)
+        fields = ["Fichier"] + self._MASTER_FIELDS
+        with open(outfile, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(compare_rows)
 
-            if n > 1:
-                srow = {"vm_ip": f"SUMMARY_STDDEV (n={n})", "mode": mode, "wan_profile": wan}
-                for f in num_fields:
-                    v = _vals(grp, f)
-                    srow[f] = round(statistics.stdev(v), 3) if len(v) > 1 else ""
-                summary.append(srow)
-
-        return summary
+        print(f"Comparatif: {outfile}  ({len(compare_rows)} ligne(s) sur {len(masters)} master(s))")
 
     def cmd_help(self, _args):
         print("""
@@ -374,7 +505,8 @@ class ServerCLI:
   status [all|<ip>]                                          Poll l'etat + derniers logs
   logs [all|<ip>] [--lines N]                                Affiche les logs de pqc_bench.sh (defaut 50 lignes)
   reset [all|<ip>]                                           Remet en idle (kill si en cours)
-  results [--output FILE]                                    Collecte et compile les CSV en master
+  results                                                    Collecte les CSV, genere master_[mode]_N.csv
+  compare [--output FILE]                                    Comparatif inter-modes depuis tous les master CSV
   help                                                       Cette aide
   exit / quit                                                Quitte le CLI
 """)
@@ -389,6 +521,7 @@ class ServerCLI:
         "logs":    cmd_logs,
         "reset":   cmd_reset,
         "results": cmd_results,
+        "compare": cmd_compare,
         "help":    cmd_help,
     }
 

@@ -9,6 +9,7 @@ timing_*.txt
 monitor_*.csv
 iperf_*.json
 handshake_timing.txt
+.server_mode
 
 # ─── Certificats et cles privees (JAMAIS dans git) ───────────────────────────
 *.pem

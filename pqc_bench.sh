@@ -453,10 +453,10 @@ collect_metrics() {
 
     {
         # En-tête CSV
-        echo "timestamp,vm_ip,target_ip,mode,profile,cipher_suite,aes_bits,\
-latency_min_ms,latency_avg_ms,latency_max_ms,latency_p99_ms,\
-throughput_mbps,handshake_avg_ms,handshake_p99_ms,\
-cpu_avg_pct,ram_avg_mb,retransmit_pct,key_size_bytes,cert_size_bytes"
+        echo "Horodatage,VM_IP,Serveur_IP,Mode,Profil,Suite_chiffrement,AES_bits,\
+Latence_min_ms,Latence_moy_ms,Latence_max_ms,Latence_p99_ms,\
+Debit_Mbps,Handshake_moy_ms,Handshake_p99_ms,\
+CPU_moy_pct,RAM_moy_Mo,Retransmissions_pct,Taille_cle_octets,Taille_cert_octets"
 
         for entry in "${TRAFFIC_RESULTS[@]}"; do
             local profile result_file throughput retransmit
@@ -512,10 +512,12 @@ key_sz, cert_sz = sys.argv[10], sys.argv[11]
 outfile = sys.argv[12]
 
 fields = [
-    "timestamp","vm_ip","target_ip","mode","schedule","profile","label","cipher_suite","aes_bits",
-    "planned_delay_s","actual_duration_s",
-    "handshake_event_ms","throughput_mbps",
-    "cpu_avg_pct","ram_avg_mb","retransmit_pct","key_size_bytes","cert_size_bytes"
+    "Horodatage","VM_IP","Serveur_IP","Mode","Type_test","Profil","Libelle",
+    "Suite_chiffrement","AES_bits",
+    "Delai_planifie_s","Duree_reelle_s",
+    "Handshake_ms","Debit_Mbps",
+    "CPU_moy_pct","RAM_moy_Mo","Retransmissions_pct",
+    "Taille_cle_octets","Taille_cert_octets"
 ]
 
 with open(outfile, "w", newline="") as f:
@@ -523,17 +525,17 @@ with open(outfile, "w", newline="") as f:
     w.writeheader()
     for e in data.get("events", []):
         w.writerow({
-            "timestamp": ts, "vm_ip": vm_ip, "target_ip": target,
-            "mode": mode, "schedule": data.get("schedule","?"),
-            "profile": e.get("type","?"), "label": e.get("label",""),
-            "cipher_suite": cipher, "aes_bits": aes_bits,
-            "planned_delay_s": e.get("planned_delay_s", 0),
-            "actual_duration_s": e.get("actual_duration_s", 0),
-            "handshake_event_ms": e.get("handshake_ms", 0),
-            "throughput_mbps": e.get("throughput_mbps", 0),
-            "cpu_avg_pct": cpu, "ram_avg_mb": ram,
-            "retransmit_pct": e.get("retransmit_pct", 0),
-            "key_size_bytes": key_sz, "cert_size_bytes": cert_sz,
+            "Horodatage": ts, "VM_IP": vm_ip, "Serveur_IP": target,
+            "Mode": mode, "Type_test": data.get("schedule","?"),
+            "Profil": e.get("type","?"), "Libelle": e.get("label",""),
+            "Suite_chiffrement": cipher, "AES_bits": aes_bits,
+            "Delai_planifie_s": e.get("planned_delay_s", 0),
+            "Duree_reelle_s": e.get("actual_duration_s", 0),
+            "Handshake_ms": e.get("handshake_ms", 0),
+            "Debit_Mbps": e.get("throughput_mbps", 0),
+            "CPU_moy_pct": cpu, "RAM_moy_Mo": ram,
+            "Retransmissions_pct": e.get("retransmit_pct", 0),
+            "Taille_cle_octets": key_sz, "Taille_cert_octets": cert_sz,
         })
 EOF
 
@@ -583,6 +585,7 @@ _cleanup_server() {
     pkill -f "openssl s_server" 2>/dev/null || true
     pkill -f "iperf3 -s"        2>/dev/null || true
     sleep 0.3
+    rm -f "${SCRIPT_DIR}/.server_mode"
     [[ $EUID -eq 0 ]] && wan_remove
     rm -rf "$CERT_DIR"
 }
@@ -637,6 +640,9 @@ cmd_server() {
     # Port marqueur (détection de déploiement par --scan)
     nc -lk -p "$PORT_MARKER" >/dev/null 2>&1 &
     _SERVER_PIDS+=($!)
+
+    # Fichier d'etat lu par server_cli.py pour auto-detecter le mode
+    echo "$mode" > "${SCRIPT_DIR}/.server_mode"
 
     log_ok "Serveur prêt sur $(local_ip) — Ctrl+C pour arrêter"
     wait

@@ -139,15 +139,21 @@ pqc>
 | --- | --- |
 | `scan [subnet]` | Scan parallele du sous-reseau, detecte les agents actifs et leur etat |
 | `list` | Tableau : IP, etat, preset, mode, WAN, derniere vue |
-| `set <ip\|all> --mode MODE --target IP [--preset N] [--wan-profile WAN] [--duration D]` | Configure une ou toutes les VMs (sans lancer) |
+| `set <ip\|all> --target IP [--preset N] [--wan-profile WAN] [--duration D]` | Configure une ou toutes les VMs — le mode est lu automatiquement depuis le serveur |
 | `arm [all\|<ip>]` | Met les VMs configurees en standby (pretes a demarrer) |
 | `launch` | Envoie START a toutes les VMs armed **simultanement** |
 | `status [all\|<ip>]` | Poll l'etat + 5 dernieres lignes de log + code de retour |
 | `logs [all\|<ip>] [--lines N]` | Affiche le log complet de pqc_bench.sh sur la VM (defaut 50 lignes) |
 | `reset [all\|<ip>]` | Remet en idle, kill le test si en cours |
-| `results [--output FILE]` | Collecte les CSV de toutes les VMs et compile un master CSV |
+| `results` | Collecte les CSV, produit `master_[mode]_N.csv` (numerotation auto) |
+| `compare [--output FILE]` | Lit tous les master CSV et produit un comparatif inter-modes |
 | `help` | Liste des commandes |
 | `exit` / `quit` | Quitte le CLI |
+
+> **Mode automatique :** `server_cli.py` lit le mode directement depuis le serveur (`pqc_bench.sh --server`
+> ecrit `.server_mode` au demarrage). Il est inutile de specifier `--mode` dans `set`.
+> Si le serveur n'est pas demarre, une erreur est affichee. Si un `--mode` est quand meme fourni
+> et ne correspond pas au serveur, la commande est refusee.
 
 ### Etats d'une VM
 
@@ -167,13 +173,18 @@ pqc> scan 192.168.1.0/24
   192.168.1.12   [idle]
 
 # 2. Configurer toutes les VMs
+#    Le mode est lu automatiquement depuis le serveur (pas besoin de --mode)
 #    --target : IP du serveur WAN (vers lequel les clients vont se connecter)
-pqc> set all --mode mlkem768 --preset 2 --target 192.168.1.1 --wan-profile eu
+pqc> set all --preset 2 --target 192.168.1.1
+  [mode auto depuis serveur: mlkem768]
+  192.168.1.10: OK
+  192.168.1.11: OK
+  192.168.1.12: OK
 
 # 3. Ou configurer chaque VM individuellement avec un preset different
-pqc> set 192.168.1.10 --mode mlkem768 --preset 1 --target 192.168.1.1
-pqc> set 192.168.1.11 --mode mlkem768 --preset 3 --target 192.168.1.1
-pqc> set 192.168.1.12 --mode mlkem768 --preset 5 --target 192.168.1.1
+pqc> set 192.168.1.10 --preset 1 --target 192.168.1.1
+pqc> set 192.168.1.11 --preset 3 --target 192.168.1.1
+pqc> set 192.168.1.12 --preset 5 --target 192.168.1.1
 
 # 4. Mettre toutes les VMs en standby
 pqc> arm all
@@ -190,37 +201,44 @@ pqc> status
   192.168.1.10: running  {'mode': 'mlkem768', 'preset': 2, ...}
     | [INFO] Handshake #42/100...
   192.168.1.11: done  rc=0
-    | [OK] CSV ecrit : results/result_mlkem768_p2.csv
 
 # 7. En cas de probleme, consulter les logs complets
 pqc> logs 192.168.1.10 --lines 30
 
-# 8. Collecter et compiler les resultats
-pqc> results --output resultats_mlkem768_eu.csv
-  192.168.1.10: 1 ligne(s)
-  192.168.1.11: 1 ligne(s)
-  192.168.1.12: 1 ligne(s)
-  Master CSV: resultats_mlkem768_eu.csv (3 lignes + 4 lignes de synthese)
+# 8. Collecter les resultats du test (genere master_mlkem768_1.csv)
+pqc> results
+  192.168.1.10: 6 evenement(s) [mlkem768]
+  192.168.1.11: 6 evenement(s) [mlkem768]
+  192.168.1.12: 6 evenement(s) [mlkem768]
+  Master CSV: results/master_mlkem768_1.csv
+
+pqc> reset all
+
+# 9. Relancer le serveur en mode classic, refaire le cycle, puis comparer
+pqc> compare
+  Comparatif: results/compare_20260622T180000.csv  (2 ligne(s) sur 2 master(s))
 ```
 
-### Format du master CSV (`results`)
+### Format des fichiers de resultats
 
-La commande `results` collecte les CSV de toutes les VMs via la socket de controle,
-sauvegarde un fichier individuel par VM dans `results/`, puis compile :
+**CSV bruts** (generes par `pqc_bench.sh` sur chaque VM) : une ligne par evenement de trafic.
+
+**Master CSV** (`master_[mode]_N.csv`) : une ligne aggregee par VM + lignes globales.
+Numerotation automatique — les anciens fichiers ne sont jamais ecrases.
 
 ```text
-vm_ip              mode      wan_profile  hs_avg_ms  throughput_mbps  ...
-192.168.1.10       mlkem768  eu           14.2       312.5            ...
-192.168.1.11       mlkem768  eu           13.8       298.1            ...
-192.168.1.12       mlkem768  eu           15.1       321.4            ...
-SUMMARY_AVG (n=3)  mlkem768  eu           14.4       310.7            ...
-SUMMARY_MIN (n=3)  mlkem768  eu           13.8       298.1            ...
-SUMMARY_MAX (n=3)  mlkem768  eu           15.1       321.4            ...
-SUMMARY_STDDEV (n=3) mlkem768 eu          0.552      11.8             ...
+Source               | Mode    | WAN | Handshake_moy_ms | Handshake_min_ms | Debit_moy_Mbps | CPU_moy_pct | ...
+192.168.1.10         | mlkem768| eu  | 14.2             | 11.1             | 9.8            | 4.2         | ...
+192.168.1.11         | mlkem768| eu  | 13.8             | 10.9             | 10.1           | 4.0         | ...
+192.168.1.12         | mlkem768| eu  | 15.1             | 11.5             | 9.5            | 4.5         | ...
+GLOBAL_MOY (n=3 VMs) | mlkem768| eu  | 14.4             | 11.2             | 9.8            | 4.2         | ...
+GLOBAL_MIN           | mlkem768| eu  | 13.8             | 10.9             | 9.5            | 4.0         | ...
+GLOBAL_MAX           | mlkem768| eu  | 15.1             | 11.5             | 10.1           | 4.5         | ...
+GLOBAL_ECART_TYPE    | mlkem768| eu  | 0.67             | 0.31             | 0.31           | 0.25        | ...
 ```
 
-Les lignes `SUMMARY_*` permettent de comparer directement les modes entre eux
-(overhead moyen, variabilite inter-VM, meilleur/pire cas).
+**Comparatif inter-modes** (`compare_[timestamp].csv`, commande `compare`) :
+extrait les lignes `GLOBAL_MOY` de tous les master CSV pour comparer les modes cote a cote.
 
 ---
 
@@ -342,26 +360,52 @@ Le serveur lance :
 
 ## Format de sortie CSV
 
-Les fichiers sont ecrits dans `results/` avec la convention de nommage :
+Les fichiers sont ecrits dans `results/` :
 
 ```text
-result_<mode>_p<preset>.csv     # mode preset (genere par vm_agent via pqc_bench.sh)
-result_<mode>_r.csv             # mode aleatoire
-log_<mode>_p<preset>.txt        # log de pqc_bench.sh (accessible via commande logs)
-result_<ip>.csv                 # collecte individuelle par la commande results
-results_master.csv              # master compile par la commande results (defaut)
+{vm_ip}_{mode}_{preset}_{ts}.csv    # CSV brut par VM (une ligne par evenement)
+log_{mode}_{preset}.txt             # Log de pqc_bench.sh (commande logs)
+raw_{ip}_{ts}.csv                   # Copie individuelle collectee par results
+master_{mode}_N.csv                 # Master agrege du test N pour ce mode
+compare_{ts}.csv                    # Comparatif inter-modes (commande compare)
 ```
+
+### Colonnes du CSV brut (par evenement)
 
 | Colonne | Description |
 | --- | --- |
-| `vm_ip` | IP de la VM cliente (ajoute lors de la compilation master) |
-| `mode` | Mode cryptographique teste |
-| `wan_profile` | Profil de latence WAN utilise |
-| `hs_min_ms` / `hs_avg_ms` / `hs_max_ms` / `hs_p99_ms` | Statistiques du handshake (ms) |
-| `cpu_avg_pct` | Utilisation CPU moyenne pendant le test |
-| `ram_avg_mb` | RAM utilisee pendant le test |
-| `file_mbps` / `voip_mbps` / `stream_mbps` / `web_mbps` / `msg_mbps` | Debit par profil |
-| `*_retrans_pct` | Taux de retransmissions TCP par profil |
+| `Horodatage` | Timestamp du test |
+| `VM_IP` | IP de la VM cliente |
+| `Serveur_IP` | IP du serveur WAN cible |
+| `Mode` | Mode cryptographique teste |
+| `Type_test` | Type de test (preset_1, preset_2...) |
+| `Profil` | Profil de trafic de l'evenement (msg, web, file, voip, stream) |
+| `Libelle` | Description lisible de l'evenement |
+| `Suite_chiffrement` | Suite TLS negociee |
+| `AES_bits` | Taille de cle AES (128 ou 256) |
+| `Delai_planifie_s` | Heure de declenchement dans le preset (secondes) |
+| `Duree_reelle_s` | Duree effective de l'evenement |
+| `Handshake_ms` | Duree du handshake TLS pour cet evenement (ms) |
+| `Debit_Mbps` | Debit mesure par iperf3 (Mbps) |
+| `CPU_moy_pct` | CPU moyen de la VM pendant le test |
+| `RAM_moy_Mo` | RAM utilisee pendant le test (Mo) |
+| `Retransmissions_pct` | Taux de retransmissions TCP |
+| `Taille_cle_octets` | Taille de la cle privee (octets) |
+| `Taille_cert_octets` | Taille du certificat (octets) |
+
+### Colonnes du master CSV (agrege par VM)
+
+| Colonne | Description |
+| --- | --- |
+| `Source` | IP de la VM ou libelle GLOBAL_* |
+| `Mode` | Mode cryptographique |
+| `WAN` | Profil de latence WAN |
+| `Handshake_moy_ms` / `min` / `max` | Statistiques handshake sur tous les evenements |
+| `Debit_moy_Mbps` / `min` / `max` | Statistiques debit (valeurs -1 exclues) |
+| `CPU_moy_pct` | CPU moyen |
+| `RAM_moy_Mo` | RAM moyenne |
+| `Retransmissions_moy_pct` | Taux de retransmissions moyen |
+| `Nb_evenements` | Nombre d'evenements de trafic du test |
 
 ---
 
@@ -370,25 +414,31 @@ results_master.csv              # master compile par la commande results (defaut
 ```text
 SERVEUR WAN                                        VMs CLIENTES
 -----------                                        ------------
-1. pqc_bench.sh --server --mode classic
+1. pqc_bench.sh --server --mode classic --wan-profile eu
 
 2. server_cli.py
    pqc> scan 192.168.x.0/24
-   pqc> set all --mode classic --preset 2 --target 192.168.x.1
+   pqc> set all --preset 2 --target 192.168.x.1
+   #    [mode auto: classic]
    pqc> arm all
    pqc> launch              ------>   [test lance simultanement sur toutes les VMs]
    pqc> status              (attente fin du test, logs visibles en cas d'erreur)
-   pqc> results             <------   [CSV collectes automatiquement]
+   pqc> results             <------   [genere master_classic_1.csv]
    pqc> reset all
 
-3. Relancer pqc_bench.sh --server --mode mlkem768
-   pqc> set all --mode mlkem768 --preset 2 --target 192.168.x.1
+3. Ctrl+C sur le serveur, puis :
+   pqc_bench.sh --server --mode mlkem768 --wan-profile eu
+   pqc> set all --preset 2 --target 192.168.x.1
+   #    [mode auto: mlkem768]
    pqc> arm all
    pqc> launch
-   pqc> results --output results_mlkem768.csv
+   pqc> results             <------   [genere master_mlkem768_1.csv]
+   pqc> reset all
 
 # Repeter pour chaque mode : mlkem512, mlkem1024, hybrid, mldsa44, mldsa65, mldsa87
-# Les master CSV resultants contiennent SUMMARY_AVG/MIN/MAX/STDDEV pour comparaison directe
+
+4. Generer le comparatif final
+   pqc> compare             <------   [compare_[ts].csv avec tous les modes cote a cote]
 ```
 
 ---
@@ -397,11 +447,11 @@ SERVEUR WAN                                        VMs CLIENTES
 
 | Metrique | Ce qu'elle revele |
 | --- | --- |
-| `hs_avg_ms` | Overhead direct de PQC vs classique a chaque connexion |
-| `SUMMARY_STDDEV hs_avg` | Variabilite entre VMs (stabilite du test) |
-| `*_mbps` | Degradation du debit sous charge crypto par type de trafic |
-| `cpu_avg_pct` | Cout CPU (ML-DSA bien plus lourd que ML-KEM) |
-| `*_retrans_pct` | Stabilite reseau sous charge |
+| `Handshake_moy_ms` | Overhead direct de PQC vs classique a chaque connexion |
+| `GLOBAL_ECART_TYPE Handshake_moy_ms` | Variabilite entre VMs (stabilite du test) |
+| `Debit_moy_Mbps` | Degradation du debit sous charge crypto |
+| `CPU_moy_pct` | Cout CPU (ML-DSA bien plus lourd que ML-KEM) |
+| `Retransmissions_moy_pct` | Stabilite reseau sous charge |
 
 ---
 
@@ -441,6 +491,9 @@ SERVEUR WAN                                        VMs CLIENTES
 | Lancement non simultane | Verifier la connectivite reseau ; un delai > 500ms indique un probleme |
 | Test se termine immediatement (etat `done` en quelques secondes) | Utiliser `logs <ip>` pour voir l'erreur dans pqc_bench.sh |
 | `--target manquant` lors du `set` | Ajouter `--target <IP_serveur_WAN>` a la commande set |
+| `ERREUR: --mode requis (serveur non demarre)` | Lancer `sudo ./pqc_bench.sh --server --mode MODE` avant d'utiliser `set` |
+| `ERREUR: mode X != mode du serveur Y` | Le serveur tourne avec un mode different — relancer le serveur avec le bon mode ou omettre `--mode` dans `set` |
+| `compare` ne trouve aucun master CSV | Lancer `results` au moins une fois pour generer un `master_*.csv` |
 
 ### Permissions apres git clone / git pull
 
