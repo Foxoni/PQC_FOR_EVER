@@ -13,7 +13,7 @@ IFS=$'\n\t'
 # =============================================================================
 # VERSION & CHEMINS
 # =============================================================================
-VERSION="1.0.0"
+VERSION="2.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_PY="${SCRIPT_DIR}/traffic_gen.py"
 
@@ -22,6 +22,7 @@ SCRIPT_PY="${SCRIPT_DIR}/traffic_gen.py"
 # =============================================================================
 OUTPUT_DIR="${SCRIPT_DIR}/results"
 TARGET=""
+SERVER_IP=""
 DURATION=30
 MODE="classic"
 PROFILES="all"
@@ -641,8 +642,9 @@ cmd_server() {
     nc -lk -p "$PORT_MARKER" >/dev/null 2>&1 &
     _SERVER_PIDS+=($!)
 
-    # Fichier d'etat lu par server_cli.py pour auto-detecter le mode
-    echo "$mode" > "${SCRIPT_DIR}/.server_mode"
+    # Fichier d'etat lu par server_cli.py pour auto-detecter le mode et l'IP
+    local bind_ip="${SERVER_IP:-$(local_ip)}"
+    printf "mode=%s\nip=%s\n" "$mode" "$bind_ip" > "${SCRIPT_DIR}/.server_mode"
 
     log_ok "Serveur prêt sur $(local_ip) — Ctrl+C pour arrêter"
     wait
@@ -959,6 +961,7 @@ while [[ $# -gt 0 ]]; do
         --hs-count)     HANDSHAKE_COUNT="$2"; shift ;;
         --output)       OUTPUT_DIR="$2";      shift ;;
         --wan-profile)  WAN_PROFILE="$2";     shift ;;
+        --server-ip)    SERVER_IP="$2";       shift ;;
         -h|--help)      usage ;;
         *) log_warn "Option inconnue : $1 (ignorée)" ;;
     esac

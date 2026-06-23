@@ -107,7 +107,9 @@ sudo ./pqc_bench.sh --install
 
 ```bash
 # Terminal 1 : lancer le serveur de trafic
+# --server-ip : optionnel, utile si la machine a plusieurs interfaces reseau
 sudo ./pqc_bench.sh --server --mode mlkem768 --wan-profile eu
+sudo ./pqc_bench.sh --server --mode mlkem768 --wan-profile eu --server-ip 192.168.x.1
 
 # Terminal 2 : lancer le CLI de controle
 python3 server_cli.py --subnet 192.168.x.0/24
@@ -137,23 +139,24 @@ pqc>
 
 | Commande | Description |
 | --- | --- |
-| `scan [subnet]` | Scan parallele du sous-reseau, detecte les agents actifs et leur etat |
-| `list` | Tableau : IP, etat, preset, mode, WAN, derniere vue |
-| `set <ip\|all> --target IP [--preset N] [--wan-profile WAN] [--duration D]` | Configure une ou toutes les VMs — le mode est lu automatiquement depuis le serveur |
-| `arm [all\|<ip>]` | Met les VMs configurees en standby (pretes a demarrer) |
+| `scan [subnet]` | Scan parallele du sous-reseau, detecte les agents et leur assigne un numero `[1]`, `[2]`... |
+| `list` | Tableau : numero, IP, etat, preset, mode, WAN, derniere vue |
+| `set <N\|ip\|all> [--preset N] [--wan-profile WAN] [--duration D]` | Configure une ou toutes les VMs par numero, IP ou `all` — mode et cible auto-detectes |
+| `arm [N\|ip\|all]` | Met les VMs configurees en standby (pretes a demarrer) |
 | `launch` | Envoie START a toutes les VMs armed **simultanement** |
-| `status [all\|<ip>]` | Poll l'etat + 5 dernieres lignes de log + code de retour |
-| `logs [all\|<ip>] [--lines N]` | Affiche le log complet de pqc_bench.sh sur la VM (defaut 50 lignes) |
-| `reset [all\|<ip>]` | Remet en idle, kill le test si en cours |
+| `status [N\|ip\|all]` | Poll l'etat + 5 dernieres lignes de log + code de retour |
+| `logs [N\|ip\|all] [--lines N]` | Affiche le log complet de pqc_bench.sh sur la VM (defaut 50 lignes) |
+| `reset [N\|ip\|all]` | Remet en idle, kill le test si en cours |
 | `results` | Collecte les CSV, produit `master_[mode]_N.csv` (numerotation auto) |
 | `compare [--output FILE]` | Lit tous les master CSV et produit un comparatif inter-modes |
 | `help` | Liste des commandes |
 | `exit` / `quit` | Quitte le CLI |
 
-> **Mode automatique :** `server_cli.py` lit le mode directement depuis le serveur (`pqc_bench.sh --server`
-> ecrit `.server_mode` au demarrage). Il est inutile de specifier `--mode` dans `set`.
-> Si le serveur n'est pas demarre, une erreur est affichee. Si un `--mode` est quand meme fourni
-> et ne correspond pas au serveur, la commande est refusee.
+> **Mode et IP automatiques :** au demarrage, `pqc_bench.sh --server` ecrit un fichier `.server_mode`
+> contenant le mode et son IP. `server_cli.py` le lit pour remplir automatiquement `--mode` et
+> `--target` dans la commande `set`. Si le serveur a plusieurs interfaces reseau, specifier
+> `--server-ip <IP>` au lancement pour choisir la bonne adresse.
+> Un `--mode` fourni manuellement different du serveur est refuse pour eviter des mesures invalides.
 
 ### Etats d'une VM
 
@@ -168,23 +171,26 @@ idle --> configured --> armed --> running --> done
 ```bash
 # 1. Decouvrir les VMs avec vm_agent actif
 pqc> scan 192.168.1.0/24
-  192.168.1.10   [idle]
-  192.168.1.11   [idle]
-  192.168.1.12   [idle]
+  [1] 192.168.1.10   [idle]
+  [2] 192.168.1.11   [idle]
+  [3] 192.168.1.12   [idle]
+3 agent(s) detecte(s).
 
-# 2. Configurer toutes les VMs
-#    Le mode est lu automatiquement depuis le serveur (pas besoin de --mode)
-#    --target : IP du serveur WAN (vers lequel les clients vont se connecter)
-pqc> set all --preset 2 --target 192.168.1.1
-  [mode auto depuis serveur: mlkem768]
+# 2. Configurer toutes les VMs (mode et IP auto-detectes depuis le serveur)
+pqc> set all --preset 2
+  [mode auto: mlkem768]
+  [target auto: 192.168.1.1]
   192.168.1.10: OK
   192.168.1.11: OK
   192.168.1.12: OK
 
-# 3. Ou configurer chaque VM individuellement avec un preset different
-pqc> set 192.168.1.10 --preset 1 --target 192.168.1.1
-pqc> set 192.168.1.11 --preset 3 --target 192.168.1.1
-pqc> set 192.168.1.12 --preset 5 --target 192.168.1.1
+# 3. Ou configurer chaque VM par son numero de scan
+pqc> set 1 --preset 1
+pqc> set 2 --preset 3
+pqc> set 3 --preset 5
+
+# On peut aussi cibler plusieurs VMs a la fois
+pqc> set 1,3 --preset 2
 
 # 4. Mettre toutes les VMs en standby
 pqc> arm all
@@ -418,8 +424,8 @@ SERVEUR WAN                                        VMs CLIENTES
 
 2. server_cli.py
    pqc> scan 192.168.x.0/24
-   pqc> set all --preset 2 --target 192.168.x.1
-   #    [mode auto: classic]
+   pqc> set all --preset 2
+   #    [mode auto: classic]  [target auto: 192.168.x.1]
    pqc> arm all
    pqc> launch              ------>   [test lance simultanement sur toutes les VMs]
    pqc> status              (attente fin du test, logs visibles en cas d'erreur)
@@ -428,8 +434,8 @@ SERVEUR WAN                                        VMs CLIENTES
 
 3. Ctrl+C sur le serveur, puis :
    pqc_bench.sh --server --mode mlkem768 --wan-profile eu
-   pqc> set all --preset 2 --target 192.168.x.1
-   #    [mode auto: mlkem768]
+   pqc> set all --preset 2
+   #    [mode auto: mlkem768]  [target auto: 192.168.x.1]
    pqc> arm all
    pqc> launch
    pqc> results             <------   [genere master_mlkem768_1.csv]

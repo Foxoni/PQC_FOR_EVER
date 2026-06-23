@@ -54,6 +54,26 @@ class ServerCLI:
     def __init__(self, default_subnet=None):
         self.vms    = {}
         self.subnet = default_subnet
+        self._idx   = {}   # {1: "192.168.x.y", ...} — assigne par cmd_scan
+
+    def _resolve(self, target):
+        """Convertit 'all', '1', '2,3', ou une IP en liste d'IPs.
+        Accepte aussi un mix : '1,192.168.1.5'."""
+        if target == "all":
+            return sorted(self.vms)
+        ips = []
+        for part in target.split(","):
+            part = part.strip()
+            try:
+                n  = int(part)
+                ip = self._idx.get(n)
+                if ip:
+                    ips.append(ip)
+                else:
+                    print(f"  [WARN] indice {n} inconnu — relancez scan")
+            except ValueError:
+                ips.append(part)   # deja une IP
+        return ips
 
     # ------------------------------------------------------------------ #
     # Transport JSON                                                       #
@@ -90,7 +110,7 @@ class ServerCLI:
             print(f"Sous-reseau invalide: {e}"); return
 
         print(f"Scan de {len(hosts)} adresses ({subnet})...")
-        found = 0
+        found_pairs = []
 
         def probe(ip):
             r = self._send(str(ip), {"cmd": "STATUS"}, timeout=SCAN_TIMEOUT)
@@ -101,39 +121,56 @@ class ServerCLI:
             for future in as_completed(futures):
                 pair = future.result()
                 if pair:
-                    ip, status = pair
-                    vm = self.vms.setdefault(ip, VM(ip))
-                    vm.state     = status.get("state", "unknown")
-                    vm.config    = status.get("config", {})
-                    vm.last_seen = datetime.now().strftime("%H:%M:%S")
-                    found += 1
-                    print(f"  {ip:17s}  [{vm.state}]")
+                    found_pairs.append(pair)
 
-        print(f"{found} agent(s) detecte(s).")
+        # Tri par IP pour des indices stables entre deux scans
+        found_pairs.sort(key=lambda p: ipaddress.ip_address(p[0]))
+        self._idx = {}
+        for n, (ip, status) in enumerate(found_pairs, 1):
+            vm = self.vms.setdefault(ip, VM(ip))
+            vm.state     = status.get("state", "unknown")
+            vm.config    = status.get("config", {})
+            vm.last_seen = datetime.now().strftime("%H:%M:%S")
+            self._idx[n] = ip
+            print(f"  [{n}] {ip:17s}  [{vm.state}]")
+
+        print(f"{len(found_pairs)} agent(s) detecte(s).")
 
     def cmd_list(self, args):
         if not self.vms:
             print("Aucune VM connue. Lancez 'scan <subnet>' d'abord."); return
 
-        print(f"\n{'IP':17s}  {'ETAT':12s}  {'PRESET':7s}  {'MODE':16s}  {'WAN':5s}  VU A")
-        print("-" * 72)
-        for ip, vm in sorted(self.vms.items()):
-            print(f"{ip:17s}  {vm.state:12s}  {str(vm.config.get('preset', '-')):7s}"
+        idx_rev = {v: k for k, v in self._idx.items()}   # ip -> n
+        print(f"\n{'#':3s}  {'IP':17s}  {'ETAT':12s}  {'PRESET':7s}  {'MODE':16s}  {'WAN':5s}  VU A")
+        print("-" * 76)
+        for ip, vm in sorted(self.vms.items(),
+                              key=lambda kv: ipaddress.ip_address(kv[0])):
+            n = str(idx_rev.get(ip, "-"))
+            print(f"{n:3s}  {ip:17s}  {vm.state:12s}  {str(vm.config.get('preset', '-')):7s}"
                   f"  {vm.config.get('mode', '-'):16s}  {vm.config.get('wan_profile', '-'):5s}"
                   f"  {vm.last_seen or '-'}")
         print()
 
-    def _server_mode(self):
-        """Lit le mode du serveur depuis le fichier d'etat ecrit par pqc_bench.sh --server."""
+    def _server_state(self):
+        """Lit mode et IP depuis le fichier d'etat ecrit par pqc_bench.sh --server.
+        Format: 'mode=classic\\nip=192.168.x.1'
+        Retourne un dict ou {} si fichier absent."""
         try:
-            return SERVER_MODE_FILE.read_text().strip() or None
+            state = {}
+            for line in SERVER_MODE_FILE.read_text().splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    state[k.strip()] = v.strip()
+            return state
         except OSError:
-            return None
+            return {}
 
     def cmd_set(self, args):
-        """set <ip|all> --target IP [--mode MODE] [--preset N] [--wan-profile WAN] [--duration D]"""
+        """set <ip|all> [--preset N] [--wan-profile WAN] [--duration D]
+        Le mode et l'IP cible sont lus automatiquement depuis le serveur."""
         if not args:
-            print("Usage: set <ip|all> --target IP [--mode MODE] [--preset N] [--wan-profile eu] [--duration 60]")
+            print("Usage: set <ip|all> [--preset N] [--wan-profile eu] [--duration 60]")
+            print("       --mode et --target sont auto-detectes depuis le serveur en cours")
             return
 
         target = args[0]
@@ -148,23 +185,28 @@ class ServerCLI:
             else:
                 i += 1
 
-        # Auto-detection du mode depuis le serveur
-        server_mode = self._server_mode()
+        srv = self._server_state()
+
+        # Auto-detection du mode
         if "mode" not in cfg:
-            if not server_mode:
-                print("ERREUR: --mode requis (serveur non demarre ou .server_mode introuvable)"); return
-            cfg["mode"] = server_mode
-            print(f"  [mode auto depuis serveur: {server_mode}]")
-        elif server_mode and cfg["mode"] != server_mode:
-            print(f"ERREUR: mode '{cfg['mode']}' != mode du serveur '{server_mode}'")
-            print(f"  Relancez le serveur avec --mode {cfg['mode']} ou omettez --mode pour utiliser '{server_mode}'")
+            if not srv.get("mode"):
+                print("ERREUR: serveur non demarre (lancer sudo ./pqc_bench.sh --server --mode MODE)"); return
+            cfg["mode"] = srv["mode"]
+            print(f"  [mode auto: {srv['mode']}]")
+        elif srv.get("mode") and cfg["mode"] != srv["mode"]:
+            print(f"ERREUR: mode '{cfg['mode']}' != mode du serveur '{srv['mode']}'")
+            print(f"  Relancez le serveur avec --mode {cfg['mode']} ou omettez --mode.")
             return
 
+        # Auto-detection de l'IP cible
         if "target" not in cfg:
-            print("ERREUR: --target requis (IP du serveur WAN)"); return
+            if not srv.get("ip"):
+                print("ERREUR: --target requis (IP du serveur WAN introuvable dans .server_mode)"); return
+            cfg["target"] = srv["ip"]
+            print(f"  [target auto: {srv['ip']}]")
 
-        targets = sorted(self.vms) if target == "all" else [target]
-        for ip in targets:
+
+        for ip in self._resolve(target):
             r = self._send(ip, {"cmd": "CONFIGURE", **cfg})
             print(f"  {ip}: {'OK' if r.get('ok') else r.get('error', '?')}")
             if r.get("ok"):
@@ -173,9 +215,8 @@ class ServerCLI:
                 vm.config = cfg
 
     def cmd_arm(self, args):
-        target  = args[0] if args else "all"
-        targets = sorted(self.vms) if target == "all" else [target]
-        for ip in targets:
+        target = args[0] if args else "all"
+        for ip in self._resolve(target):
             r = self._send(ip, {"cmd": "ARM"})
             print(f"  {ip}: {'armed' if r.get('ok') else r.get('error', '?')}")
             if r.get("ok"):
@@ -239,9 +280,8 @@ class ServerCLI:
                 print(f"  {ip}: ERREUR — {r.get('error')}")
 
     def cmd_status(self, args):
-        target  = args[0] if args else "all"
-        targets = sorted(self.vms) if target == "all" else [target]
-        for ip in targets:
+        target = args[0] if args else "all"
+        for ip in self._resolve(target):
             r = self._send(ip, {"cmd": "STATUS"})
             if r.get("ok"):
                 vm = self.vms.setdefault(ip, VM(ip))
@@ -265,9 +305,8 @@ class ServerCLI:
                 n = int(args[idx + 1])
             args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
 
-        target  = args[0] if args else "all"
-        targets = sorted(self.vms) if target == "all" else [target]
-        for ip in targets:
+        target = args[0] if args else "all"
+        for ip in self._resolve(target):
             r = self._send(ip, {"cmd": "GET_LOGS", "lines": n}, timeout=10)
             print(f"\n{'='*60}")
             print(f"  {ip}  etat={r.get('state', '?')}  rc={r.get('returncode', '?')}")
@@ -279,9 +318,8 @@ class ServerCLI:
         print()
 
     def cmd_reset(self, args):
-        target  = args[0] if args else "all"
-        targets = sorted(self.vms) if target == "all" else [target]
-        for ip in targets:
+        target = args[0] if args else "all"
+        for ip in self._resolve(target):
             r = self._send(ip, {"cmd": "RESET"})
             print(f"  {ip}: {'idle' if r.get('ok') else r.get('error', '?')}")
             if r.get("ok"):
