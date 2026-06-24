@@ -587,13 +587,15 @@ measure_handshake() {
 
         t0=$(now_ms)
         # shellcheck disable=SC2086
+        # -verify_return_error retiré : le cert est auto-signé (code 18), ce qui ferait
+        # échouer chaque mesure alors que le handshake TLS est valide. On détecte l'échec
+        # réel (ECONNREFUSED, handshake avorté) sur le code de retour sans ce flag.
         if openssl s_client \
             -connect "${target}:${PORT_TLS}" \
             -tls1_3 \
             -ciphersuites "$cipher" \
             $groups_arg $provider_arg \
             -CAfile "$CERT_DIR/server.crt" \
-            -verify_return_error \
             -no_ign_eof \
             </dev/null 2>/dev/null; then
             t1=$(now_ms)
