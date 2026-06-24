@@ -261,7 +261,6 @@ check_deps() {
     has_cmd hping3  || log_warn "hping3 absent  → TCP_connect_ms et Ping_p99_ms indisponibles"
     has_cmd tshark  || log_warn "tshark absent  → métriques handshake réseau indisponibles (Fragmentation_pct, Handshake_paquets, Handshake_octets)"
     has_cmd fping   || true   # fallback silencieux vers hping3 / ping
-    has_cmd curl    || log_warn "curl absent    → TTFB_ms indisponible"
 
     check_network_caps
     $all_ok
@@ -410,22 +409,33 @@ measure_tcp_connect() {
     fi
 }
 
-# Mesure le TTFB via le temps d'appconnect TLS (curl -w %{time_appconnect}).
+# Mesure le TTFB (TCP + TLS handshake complet) via openssl s_client avec les bons providers.
+# curl ne supporte pas oqs-provider → impossible de négocier X25519MLKEM768/OQS.
+# On réutilise openssl s_client (même binaire que le reste du bench) pour une mesure cohérente.
 measure_ttfb() {
     local target="$1" port="${2:-$PORT_TLS}"
-    if ! $CAN_CURL; then TTFB_MS=-1; return; fi
-    local raw
-    # --insecure : curl n'a pas oqs-provider chargé et ne peut pas vérifier les certs OQS
-    # On mesure le temps de handshake TLS, pas la chaîne de confiance
-    raw=$(curl -sk --connect-timeout 3 \
-        -o /dev/null \
-        -w "%{time_appconnect}" \
-        --insecure \
-        "https://${target}:${port}/" \
-        2>/dev/null || echo -1)
-    TTFB_MS=$(python3 -c "
-v=float('${raw}'.strip() or -1)
-print(round(v*1000,2) if v>0 else -1)" 2>/dev/null || echo -1)
+    local mode="${3:-$MODE}" cipher="${4:-}" provider_arg="${5:-}" groups_arg="${6:-}"
+    [[ -z "$cipher" ]]       && cipher=$(get_cipher "$mode")
+    [[ -z "$provider_arg" ]] && provider_arg=$(get_provider_args "$mode")
+    [[ -z "$groups_arg" ]]   && groups_arg=$(get_groups_arg "$mode")
+
+    local t0 t1
+    t0=$(now_ms)
+    # shellcheck disable=SC2086
+    openssl s_client \
+        -connect "${target}:${port}" \
+        -tls1_3 \
+        -ciphersuites "$cipher" \
+        $groups_arg $provider_arg \
+        -no_ign_eof \
+        </dev/null 2>/dev/null
+    local rc=$?
+    t1=$(now_ms)
+    if [[ $rc -eq 0 ]]; then
+        TTFB_MS=$(( t1 - t0 ))
+    else
+        TTFB_MS=-1
+    fi
 }
 
 # Démarre une capture tshark sur un handshake (le premier uniquement).
@@ -433,11 +443,25 @@ capture_hs_start() {
     local target="$1" port="${2:-$PORT_TLS}"
     if ! $CAN_CAPTURE; then return; fi
     _TSHARK_PCAP="/tmp/pqc_hs_cap_$$.pcap"
-    local iface; iface=$(net_iface)
+
+    # Interface vers la cible précise (pas 1.1.1.1 qui peut passer ailleurs)
+    local iface
+    iface=$(ip route get "$target" 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+    iface="${iface:-$(net_iface)}"
+
+    local tshark_log="/tmp/pqc_tshark_$$.log"
     tshark -i "$iface" -f "host ${target} and port ${port}" \
-        -w "$_TSHARK_PCAP" > /dev/null 2>&1 &
+        -w "$_TSHARK_PCAP" > "$tshark_log" 2>&1 &
     _TSHARK_PID=$!
-    sleep 0.1   # laisser tshark s'initialiser
+
+    sleep 0.3   # laisser tshark démarrer et ouvrir le fichier de capture
+    if ! kill -0 "$_TSHARK_PID" 2>/dev/null; then
+        log_warn "tshark n'a pas démarré (interface: $iface) — $(cat "$tshark_log" 2>/dev/null | head -1)"
+        rm -f "$tshark_log" "$_TSHARK_PCAP"
+        _TSHARK_PID=0; _TSHARK_PCAP=""
+    fi
+    rm -f "$tshark_log"
 }
 
 capture_hs_stop() {
@@ -591,7 +615,7 @@ measure_handshake() {
 
     # Métriques réseau one-shot (avant le bulk, sur une connexion propre)
     measure_tcp_connect "$target" "$PORT_TLS"
-    measure_ttfb        "$target" "$PORT_TLS"
+    measure_ttfb        "$target" "$PORT_TLS" "$mode" "$cipher" "$provider_arg" "$groups_arg"
 
     local errors=0 t0 t1 ms capture_done=false
     for _ in $(seq 1 "$count"); do
