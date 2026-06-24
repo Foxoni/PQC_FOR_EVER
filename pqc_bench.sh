@@ -361,7 +361,9 @@ net_jitter_start() {
     _JITTER_PID=$!
     sleep 0.2
     if ! kill -0 "$_JITTER_PID" 2>/dev/null; then
-        log_warn "iperf3 UDP jitter vers $target:$PORT_IPERF_JITTER échoué — UDP bloqué par firewall ? (ufw allow 5210/udp)"
+        log_warn "iperf3 UDP jitter vers $target:$PORT_IPERF_JITTER échoué"
+        log_warn "  iperf3 utilise TCP pour le contrôle même en mode UDP — vérifiez que TCP ET UDP sont ouverts"
+        log_warn "  Sur le serveur : sudo ufw allow 5201:5210   (ou sudo ufw allow 5210)"
         _JITTER_PID=0
     fi
 }
@@ -455,9 +457,21 @@ capture_hs_start() {
         -w "$_TSHARK_PCAP" > "$tshark_log" 2>&1 &
     _TSHARK_PID=$!
 
-    sleep 0.3   # laisser tshark démarrer et ouvrir le fichier de capture
+    # Attendre que tshark ait écrit l'en-tête PCAP (fichier non vide = capture active)
+    # Timeout : 1s (10 × 100ms) pour supporter les VMs sous charge
+    local i=0
+    while [[ $i -lt 10 ]] && ! [[ -s "$_TSHARK_PCAP" ]]; do
+        sleep 0.1
+        (( i++ )) || true
+    done
+
     if ! kill -0 "$_TSHARK_PID" 2>/dev/null; then
-        log_warn "tshark n'a pas démarré (interface: $iface) — $(cat "$tshark_log" 2>/dev/null | head -1)"
+        log_warn "tshark n'a pas démarré sur $iface — $(head -1 "$tshark_log" 2>/dev/null)"
+        rm -f "$tshark_log" "$_TSHARK_PCAP"
+        _TSHARK_PID=0; _TSHARK_PCAP=""
+    elif ! [[ -s "$_TSHARK_PCAP" ]]; then
+        log_warn "tshark actif mais PCAP vide après 1s (interface: $iface) — capture ignorée"
+        kill "$_TSHARK_PID" 2>/dev/null; wait "$_TSHARK_PID" 2>/dev/null || true
         rm -f "$tshark_log" "$_TSHARK_PCAP"
         _TSHARK_PID=0; _TSHARK_PCAP=""
     fi
