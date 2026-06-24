@@ -106,10 +106,13 @@ sudo ./pqc_bench.sh --install
 ### Sur le serveur WAN
 
 ```bash
+# Aide et liste des modes disponibles
+sudo ./pqc_bench.sh --server --help
+
 # Terminal 1 : lancer le serveur de trafic
 # --server-ip : optionnel, utile si la machine a plusieurs interfaces reseau
-sudo ./pqc_bench.sh --server --mode mlkem768 --wan-profile eu
-sudo ./pqc_bench.sh --server --mode mlkem768 --wan-profile eu --server-ip 192.168.x.1
+sudo ./pqc_bench.sh --server --mode hybrid-full --wan-profile eu
+sudo ./pqc_bench.sh --server --mode hybrid-full --wan-profile eu --server-ip 192.168.x.1
 
 # Terminal 2 : lancer le CLI de controle
 python3 server_cli.py --subnet 192.168.x.0/24
@@ -178,7 +181,7 @@ pqc> scan 192.168.1.0/24
 
 # 2. Configurer toutes les VMs (mode et IP auto-detectes depuis le serveur)
 pqc> set all --preset 2
-  [mode auto: mlkem768]
+  [mode auto: hybrid-full]
   [target auto: 192.168.1.1]
   192.168.1.10: OK
   192.168.1.11: OK
@@ -204,19 +207,19 @@ pqc> launch
 
 # 6. Surveiller l'avancement (affiche aussi les derniers logs)
 pqc> status
-  192.168.1.10: running  {'mode': 'mlkem768', 'preset': 2, ...}
+  192.168.1.10: running  {'mode': 'hybrid-full', 'preset': 2, ...}
     | [INFO] Handshake #42/100...
   192.168.1.11: done  rc=0
 
 # 7. En cas de probleme, consulter les logs complets
 pqc> logs 192.168.1.10 --lines 30
 
-# 8. Collecter les resultats du test (genere master_mlkem768_1.csv)
+# 8. Collecter les resultats du test (genere master_hybrid-full_1.csv)
 pqc> results
-  192.168.1.10: 6 evenement(s) [mlkem768]
-  192.168.1.11: 6 evenement(s) [mlkem768]
-  192.168.1.12: 6 evenement(s) [mlkem768]
-  Master CSV: results/master_mlkem768_1.csv
+  192.168.1.10: 6 evenement(s) [hybrid-full]
+  192.168.1.11: 6 evenement(s) [hybrid-full]
+  192.168.1.12: 6 evenement(s) [hybrid-full]
+  Master CSV: results/master_hybrid-full_1.csv
 
 pqc> reset all
 
@@ -233,14 +236,14 @@ pqc> compare
 Numerotation automatique — les anciens fichiers ne sont jamais ecrases.
 
 ```text
-Source               | Mode    | WAN | Handshake_moy_ms | Handshake_min_ms | Debit_moy_Mbps | CPU_moy_pct | ...
-192.168.1.10         | mlkem768| eu  | 14.2             | 11.1             | 9.8            | 4.2         | ...
-192.168.1.11         | mlkem768| eu  | 13.8             | 10.9             | 10.1           | 4.0         | ...
-192.168.1.12         | mlkem768| eu  | 15.1             | 11.5             | 9.5            | 4.5         | ...
-GLOBAL_MOY (n=3 VMs) | mlkem768| eu  | 14.4             | 11.2             | 9.8            | 4.2         | ...
-GLOBAL_MIN           | mlkem768| eu  | 13.8             | 10.9             | 9.5            | 4.0         | ...
-GLOBAL_MAX           | mlkem768| eu  | 15.1             | 11.5             | 10.1           | 4.5         | ...
-GLOBAL_ECART_TYPE    | mlkem768| eu  | 0.67             | 0.31             | 0.31           | 0.25        | ...
+Source               | Mode        | WAN | Handshake_moy_ms | Handshake_min_ms | Debit_moy_Mbps | CPU_moy_pct | ...
+192.168.1.10         | hybrid-full | eu  | 22.4             | 18.1             | 9.8            | 5.1         | ...
+192.168.1.11         | hybrid-full | eu  | 21.8             | 17.9             | 10.1           | 4.9         | ...
+192.168.1.12         | hybrid-full | eu  | 23.1             | 18.5             | 9.5            | 5.3         | ...
+GLOBAL_MOY (n=3 VMs) | hybrid-full | eu  | 22.4             | 18.2             | 9.8            | 5.1         | ...
+GLOBAL_MIN           | hybrid-full | eu  | 21.8             | 17.9             | 9.5            | 4.9         | ...
+GLOBAL_MAX           | hybrid-full | eu  | 23.1             | 18.5             | 10.1           | 5.3         | ...
+GLOBAL_ECART_TYPE    | hybrid-full | eu  | 0.67             | 0.31             | 0.31           | 0.20        | ...
 ```
 
 **Comparatif inter-modes** (`compare_[timestamp].csv`, commande `compare`) :
@@ -250,24 +253,30 @@ extrait les lignes `GLOBAL_MOY` de tous les master CSV pour comparer les modes c
 
 ## Modes de chiffrement
 
-Selection via `--mode <MODE>` :
+Selection via `--mode <MODE>` (voir aussi `./pqc_bench.sh --list-modes`) :
 
-| Mode | Echange de cle | Signature | Chiffrement symetrique | Standard |
-| --- | --- | --- | --- | --- |
-| `classic` | X25519 (ECDHE) | ECDSA P-256 | AES-128-GCM | TLS 1.3 actuel |
-| `mlkem512` | ML-KEM-512 | ECDSA P-256 | AES-128-GCM | FIPS 203 Cat.1 |
-| `mlkem768` | ML-KEM-768 | ECDSA P-256 | AES-256-GCM | FIPS 203 Cat.3 |
-| `mlkem1024` | ML-KEM-1024 | ECDSA P-256 | AES-256-GCM | FIPS 203 Cat.5 |
-| `hybrid` | X25519 + ML-KEM-768 | ECDSA P-256 | AES-256-GCM | Recommande NIST (transition) |
-| `mldsa44` | X25519 | ML-DSA-44 | AES-256-GCM | FIPS 204 Cat.2 |
-| `mldsa65` | X25519 | ML-DSA-65 | AES-256-GCM | FIPS 204 Cat.3 |
-| `mldsa87` | X25519 | ML-DSA-87 | AES-256-GCM | FIPS 204 Cat.5 |
+| Priorite | Mode | KEM | Signature (certificat) | AES | Standard |
+| --- | --- | --- | --- | --- | --- |
+| ★★★ | `hybrid-full` | X25519 + ML-KEM-768 | ECDSA P-256 + ML-DSA-65 | 256-GCM | **Cible CNSA 2.0** |
+| ★★☆ | `hybrid-kem` | X25519 + ML-KEM-768 | ECDSA P-256 | 256-GCM | Transition hybride KEM |
+| ★★☆ | `classic` | X25519 (ECDHE) | ECDSA P-256 | 256-GCM | Baseline classique |
+| ★☆☆ | `mlkem768` | ML-KEM-768 | ECDSA P-256 | 256-GCM | FIPS 203 Cat.3 |
+| ★☆☆ | `mlkem1024` | ML-KEM-1024 | ECDSA P-256 | 256-GCM | FIPS 203 Cat.5 |
+| ★☆☆ | `mlkem512` | ML-KEM-512 | ECDSA P-256 | 128-GCM | FIPS 203 Cat.1 |
+| ★☆☆ | `mldsa65` | X25519 | ML-DSA-65 | 256-GCM | FIPS 204 Cat.3 |
+| ★☆☆ | `mldsa44` | X25519 | ML-DSA-44 | 256-GCM | FIPS 204 Cat.2 |
+| ★☆☆ | `mldsa87` | X25519 | ML-DSA-87 | 256-GCM | FIPS 204 Cat.5 |
+| ☆☆☆ | `slhdsa128` | X25519 + ML-KEM-768 | SLH-DSA-128s | 256-GCM | FIPS 205 (lent) |
+| ☆☆☆ | `slhdsa256` | X25519 + ML-KEM-768 | SLH-DSA-256s | 256-GCM | FIPS 205 (lent) |
 
-> **Pourquoi AES-256 pour les modes PQC ?**  
-> L'algorithme de Grover reduit la securite effective d'AES-128 a ~64 bits face a un ordinateur
-> quantique. Le NIST recommande AES-256 minimum pour tout systeme post-quantum safe.
-> ML-KEM-512 reste en AES-128 car c'est son niveau de securite declare (Cat.1), utile pour
-> mesurer l'overhead a iso-niveau de securite classique.
+> **Notes :**
+>
+> - `hybrid-full` utilise un certificat composite `p256_mldsa65` (oqs-provider 0.5+) :
+>   double signature ECDSA + ML-DSA dans le meme certificat.
+> - `slhdsa*` utilise les alias liboqs : `sphincssha2128ssimple` / `sphincssha2256ssimple`.
+> - `mlkem512` reste en AES-128 car son niveau de securite declare est Cat.1 (iso-classique).
+> - Tous les autres modes (y compris `classic`) utilisent AES-256 : Grover reduit AES-128
+>   a ~64 bits effectifs face a un ordinateur quantique.
 
 ---
 
@@ -278,10 +287,10 @@ du test**, pas uniquement a T=0.
 
 ```bash
 # 5 minutes de trafic, puis ecriture CSV
-./pqc_bench.sh --target 10.0.1.1 --mode mlkem768 --random --duration 300
+./pqc_bench.sh --target 10.0.1.1 --mode hybrid-full --random --duration 300
 
 # Infini - Ctrl+C pour arreter
-./pqc_bench.sh --target 10.0.1.1 --mode hybrid --random
+./pqc_bench.sh --target 10.0.1.1 --mode hybrid-kem --random
 ```
 
 5 schedulers independants tournent en parallele :
@@ -304,9 +313,10 @@ du test**, pas uniquement a T=0.
 # Voir le detail de tous les presets
 python3 traffic_presets.py list
 
-# Executer le preset 3 (identique sur les deux modes = comparaison valide)
-./pqc_bench.sh --target 10.0.1.1 --mode classic  --preset 3
-./pqc_bench.sh --target 10.0.1.1 --mode mlkem768 --preset 3
+# Sequence comparative recommandee (meme preset = comparaison valide)
+./pqc_bench.sh --target 10.0.1.1 --mode classic      --preset 3
+./pqc_bench.sh --target 10.0.1.1 --mode hybrid-kem   --preset 3
+./pqc_bench.sh --target 10.0.1.1 --mode hybrid-full  --preset 3
 ```
 
 | Preset | Profil | Trafic |
@@ -325,7 +335,11 @@ python3 traffic_presets.py list
 ## Serveur WAN simule (`--server`)
 
 ```bash
-sudo ./pqc_bench.sh --server --mode mlkem768 --wan-profile eu
+# Aide serveur (liste des modes, options)
+sudo ./pqc_bench.sh --server --help
+
+# Lancer le serveur (le mode choisi ici est transmis automatiquement aux VMs)
+sudo ./pqc_bench.sh --server --mode hybrid-full --wan-profile eu
 ```
 
 Le serveur lance :
@@ -350,16 +364,19 @@ Le serveur lance :
 
 ```text
 --target <IP>         IP du serveur WAN (obligatoire pour les modes test)
---mode <MODE>         Mode cryptographique (voir tableau ci-dessus)
+--mode <MODE>         Mode cryptographique (voir tableau des modes)
+--list-modes          Affiche le tableau detaille des modes et quitte
 --random              Trafic aleatoire continu staggere
 --preset <N>          Preset predefini 1-5 (60s)
 --profile <PROFILS>   Trafic libre en parallele : web,file,voip,stream,msg,all
 --duration <sec>      Duree en secondes (--random: 0=infini | --profile: defaut 30)
 --hs-count <N>        Iterations pour la mesure de handshake bulk (defaut: 100)
---output <FILE>       Fichier CSV de sortie
+--output <DIR>        Repertoire de sortie CSV (defaut: ./results)
 --wan-profile <p>     Profil latence WAN pour --server : fr | eu | us
+--server-ip <IP>      Force l'IP ecrite dans .server_mode (plusieurs interfaces)
 --scan [SUBNET]       Scan reseau (defaut: sous-reseau local /24)
 --install             Installe les dependances (sudo requis)
+--server --help       Affiche l'aide serveur avec la liste des modes valides
 ```
 
 ---
@@ -432,16 +449,14 @@ SERVEUR WAN                                        VMs CLIENTES
    pqc> results             <------   [genere master_classic_1.csv]
    pqc> reset all
 
-3. Ctrl+C sur le serveur, puis :
-   pqc_bench.sh --server --mode mlkem768 --wan-profile eu
-   pqc> set all --preset 2
-   #    [mode auto: mlkem768]  [target auto: 192.168.x.1]
-   pqc> arm all
-   pqc> launch
-   pqc> results             <------   [genere master_mlkem768_1.csv]
-   pqc> reset all
+3. Ctrl+C sur le serveur, relancer avec un autre mode, repeter :
+   pqc_bench.sh --server --mode hybrid-kem  --wan-profile eu
+   # [mode auto: hybrid-kem]  -> master_hybrid-kem_1.csv
+   pqc_bench.sh --server --mode hybrid-full --wan-profile eu
+   # [mode auto: hybrid-full] -> master_hybrid-full_1.csv
 
-# Repeter pour chaque mode : mlkem512, mlkem1024, hybrid, mldsa44, mldsa65, mldsa87
+# Modes supplementaires selon les besoins :
+# mlkem512, mlkem768, mlkem1024, mldsa44, mldsa65, mldsa87, slhdsa128, slhdsa256
 
 4. Generer le comparatif final
    pqc> compare             <------   [compare_[ts].csv avec tous les modes cote a cote]
@@ -499,6 +514,7 @@ SERVEUR WAN                                        VMs CLIENTES
 | `--target manquant` lors du `set` | Ajouter `--target <IP_serveur_WAN>` a la commande set |
 | `ERREUR: --mode requis (serveur non demarre)` | Lancer `sudo ./pqc_bench.sh --server --mode MODE` avant d'utiliser `set` |
 | `ERREUR: mode X != mode du serveur Y` | Le serveur tourne avec un mode different — relancer le serveur avec le bon mode ou omettre `--mode` dans `set` |
+| `[ERR] Mode inconnu : 'xxx'` au demarrage du serveur | Le mode n'existe pas — lancer `sudo ./pqc_bench.sh --server --help` pour voir la liste |
 | `compare` ne trouve aucun master CSV | Lancer `results` au moins une fois pour generer un `master_*.csv` |
 
 ### Permissions apres git clone / git pull

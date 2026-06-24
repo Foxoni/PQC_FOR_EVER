@@ -47,25 +47,34 @@ PORT_IPERF_MSG=5205
 
 # =============================================================================
 # SUITES DE CHIFFREMENT TLS 1.3
-# Baseline  → AES-128-GCM (norme actuelle, suffisant en classique)
-# PQC 768+  → AES-256-GCM (recommandé NIST : Grover réduit AES-128 à ~64 bits)
+# mlkem512 → AES-128-GCM (Cat.1, même niveau de sécurité symétrique)
+# Tous les autres modes (classic inclus) → AES-256-GCM
+# (Grover réduit AES-128 à ~64 bits face à un ordinateur quantique)
 # =============================================================================
 CIPHER_128="TLS_AES_128_GCM_SHA256"
 CIPHER_256="TLS_AES_256_GCM_SHA384"
 
-# Groupes TLS pour l'échange de clé ML-KEM (noms oqs-provider)
+# Groupes TLS pour l'échange de clé (noms oqs-provider)
+# Les modes sans entrée utilisent le groupe par défaut (X25519)
 declare -A OQS_KEM_GROUP=(
     [mlkem512]="mlkem512"
     [mlkem768]="mlkem768"
     [mlkem1024]="mlkem1024"
-    [hybrid]="X25519MLKEM768"       # hybride recommandé NIST
+    [hybrid-kem]="X25519MLKEM768"    # Mode 1 : hybride KEM seul
+    [hybrid-full]="X25519MLKEM768"   # Mode 2 : hybride KEM + signature
+    [slhdsa128]="X25519MLKEM768"     # Mode 5a : SLH-DSA + KEM hybride
+    [slhdsa256]="X25519MLKEM768"     # Mode 5b : SLH-DSA-256 + KEM hybride
 )
 
-# Algorithmes ML-DSA pour la génération de certificats
+# Algorithmes de signature OQS pour la génération de certificats
+# Les modes absents utilisent ECDSA P-256 (openssl standard)
 declare -A OQS_SIG_ALG=(
     [mldsa44]="mldsa44"
     [mldsa65]="mldsa65"
     [mldsa87]="mldsa87"
+    [hybrid-full]="p256_mldsa65"            # ECDSA P-256 + ML-DSA-65 (composite)
+    [slhdsa128]="sphincssha2128ssimple"     # SLH-DSA-128s (FIPS 205)
+    [slhdsa256]="sphincssha2256ssimple"     # SLH-DSA-256s (FIPS 205)
 )
 
 # Profils de latence WAN simulée via tc-netem
@@ -216,22 +225,20 @@ KEY_SIZE=0
 CERT_SIZE=0
 
 get_cipher() {
-    # ML-KEM-512 reste en AES-128 (même niveau sécurité Cat.1)
-    # Tous les modes PQC supérieurs passent en AES-256 (résistance Grover)
+    # mlkem512 (Cat.1) reste en AES-128 ; tout le reste passe en AES-256
     case "$1" in
-        classic|mlkem512) echo "$CIPHER_128" ;;
-        *)                echo "$CIPHER_256"  ;;
+        mlkem512) echo "$CIPHER_128" ;;
+        *)        echo "$CIPHER_256"  ;;
     esac
 }
 
 get_aes_bits() {
     case "$1" in
-        classic|mlkem512) echo "128" ;;
-        *)                echo "256" ;;
+        mlkem512) echo "128" ;;
+        *)        echo "256" ;;
     esac
 }
 
-# Arguments -provider à passer à openssl pour les modes PQC
 get_provider_args() {
     case "$1" in
         classic) echo "" ;;
@@ -239,24 +246,31 @@ get_provider_args() {
     esac
 }
 
-# Argument -groups pour forcer le groupe KEM en TLS 1.3
 get_groups_arg() {
     local grp="${OQS_KEM_GROUP[$1]:-}"
     [[ -n "$grp" ]] && echo "-groups $grp" || echo ""
 }
 
-is_sig_mode() { [[ "$1" == mldsa* ]]; }
-is_kem_mode() { [[ "$1" == mlkem* || "$1" == "hybrid" ]]; }
+# Vrai si le mode utilise un certificat OQS (signature post-quantique ou hybride)
+is_sig_mode() {
+    [[ "$1" == mldsa* || "$1" == "hybrid-full" || "$1" == slhdsa* ]]
+}
+
+# Vrai si le mode utilise un échange de clé post-quantique
+is_kem_mode() {
+    [[ "$1" == mlkem* || "$1" == "hybrid-kem" || "$1" == "hybrid-full" || "$1" == slhdsa* ]]
+}
 
 crypto_gen_certs() {
     local mode="$1"
     mkdir -p "$CERT_DIR"
     log_info "Génération des certificats (mode: $mode)..."
 
-    if is_sig_mode "$mode"; then
-        # ML-DSA : le certificat lui-même utilise la clé post-quantique
-        local alg="${OQS_SIG_ALG[$mode]}"
-        openssl genpkey -algorithm "$alg" \
+    local sig_alg="${OQS_SIG_ALG[$mode]:-}"
+
+    if [[ -n "$sig_alg" ]]; then
+        # mldsa*, hybrid-full, slhdsa* : certificat OQS (pure ou composite)
+        openssl genpkey -algorithm "$sig_alg" \
             -provider oqsprovider -provider default \
             -out "$CERT_DIR/server.key" 2>/dev/null
         openssl req -new -x509 \
@@ -265,7 +279,7 @@ crypto_gen_certs() {
             -days 1 -subj "/CN=pqc-bench" \
             -provider oqsprovider -provider default 2>/dev/null
     else
-        # Classique & ML-KEM : ECDSA P-256 pour l'authentification
+        # classic, mlkem*, hybrid-kem : ECDSA P-256
         # (ML-KEM gère uniquement l'échange de clé, pas la signature)
         openssl ecparam -name prime256v1 -genkey -noout \
             -out "$CERT_DIR/server.key" 2>/dev/null
@@ -591,8 +605,25 @@ _cleanup_server() {
     rm -rf "$CERT_DIR"
 }
 
+_valid_server_mode() {
+    case "$1" in
+        classic|hybrid-kem|hybrid-full|\
+        mlkem512|mlkem768|mlkem1024|\
+        mldsa44|mldsa65|mldsa87|\
+        slhdsa128|slhdsa256) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 cmd_server() {
     local mode="${1:-classic}" wan_profile="${2:-eu}"
+
+    if ! _valid_server_mode "$mode"; then
+        log_error "Mode inconnu : '$mode'"
+        echo ""
+        usage_server
+    fi
+
     log_section "MODE SERVEUR | crypto: $mode | WAN: $wan_profile"
 
     crypto_gen_certs "$mode"
@@ -857,6 +888,81 @@ cmd_collect_only() {
 }
 
 # =============================================================================
+# AIDE SERVEUR
+# =============================================================================
+usage_server() {
+    cat <<EOF
+${BOLD}pqc_bench.sh v${VERSION}${NC} — Mode serveur
+
+${BOLD}USAGE :${NC}
+  sudo $0 --server --mode <MODE> [--wan-profile <WAN>] [--server-ip <IP>]
+
+${BOLD}MODES DISPONIBLES :${NC}
+  Priorité  Mode          KEM                    Signature                AES
+  ─────────────────────────────────────────────────────────────────────────────
+  ★★★       hybrid-full   X25519 + ML-KEM-768    ECDSA P-256 + ML-DSA-65  256   ${CYAN}← CNSA 2.0${NC}
+  ★★☆       hybrid-kem    X25519 + ML-KEM-768    ECDSA P-256              256
+  ★★☆       classic       X25519                 ECDSA P-256              256   baseline
+  ★☆☆       mlkem768      ML-KEM-768             ECDSA P-256              256
+  ★☆☆       mlkem1024     ML-KEM-1024            ECDSA P-256              256
+  ★☆☆       mlkem512      ML-KEM-512             ECDSA P-256              128
+  ★☆☆       mldsa65       X25519                 ML-DSA-65                256
+  ★☆☆       mldsa44       X25519                 ML-DSA-44                256
+  ★☆☆       mldsa87       X25519                 ML-DSA-87                256
+  ☆☆☆       slhdsa128     X25519 + ML-KEM-768    SLH-DSA-128s             256   lent
+  ☆☆☆       slhdsa256     X25519 + ML-KEM-768    SLH-DSA-256s             256   lent
+
+${BOLD}OPTIONS :${NC}
+  --wan-profile <WAN>   Latence injectee : fr (15ms) | eu (35ms) | us (80ms)
+                        Necessite sudo  (tc-netem sur l'interface sortante)
+  --server-ip <IP>      Force l'IP ecrite dans .server_mode (utile si plusieurs
+                        interfaces reseau — server_cli.py lit ce fichier)
+
+${BOLD}EXEMPLES :${NC}
+  sudo $0 --server --mode hybrid-full --wan-profile eu
+  sudo $0 --server --mode classic     --wan-profile fr --server-ip 192.168.1.1
+
+${BOLD}NOTE :${NC}
+  Le mode choisi ici est transmis automatiquement aux VMs clientes via .server_mode.
+  Les VMs n'ont pas besoin de specifier --mode manuellement (server_cli.py le detecte).
+
+EOF
+    exit 0
+}
+
+# =============================================================================
+# LISTE DES MODES
+# =============================================================================
+cmd_list_modes() {
+    cat <<EOF
+${BOLD}Modes cryptographiques disponibles — pqc_bench.sh v${VERSION}${NC}
+Grille conforme NIST FIPS 203/204/205 et recommandations CNSA 2.0
+
+${BOLD}Priorité  Mode          KEM                    Signature              AES   Objectif${NC}
+─────────────────────────────────────────────────────────────────────────────────────────────
+${CYAN}★★★${NC}       hybrid-full   X25519 + ML-KEM-768    ECDSA P-256 + ML-DSA-65  256   Cible CNSA 2.0 (référence)
+${CYAN}★★☆${NC}       hybrid-kem    X25519 + ML-KEM-768    ECDSA P-256              256   Transition hybride KEM
+${CYAN}★★☆${NC}       classic       X25519                 ECDSA P-256              256   Baseline classique
+${CYAN}★☆☆${NC}       mlkem768      ML-KEM-768             ECDSA P-256              256   PQC pur KEM Cat.3
+${CYAN}★☆☆${NC}       mlkem1024     ML-KEM-1024            ECDSA P-256              256   PQC pur KEM Cat.5
+${CYAN}★☆☆${NC}       mlkem512      ML-KEM-512             ECDSA P-256              128   PQC pur KEM Cat.1
+${CYAN}★☆☆${NC}       mldsa65       X25519                 ML-DSA-65                256   PQC pur Sig Cat.3
+${CYAN}★☆☆${NC}       mldsa44       X25519                 ML-DSA-44                256   PQC pur Sig Cat.2
+${CYAN}★☆☆${NC}       mldsa87       X25519                 ML-DSA-87                256   PQC pur Sig Cat.5
+${CYAN}☆☆☆${NC}       slhdsa128     X25519 + ML-KEM-768    SLH-DSA-128s             256   Hash-based Sig (lent)
+${CYAN}☆☆☆${NC}       slhdsa256     X25519 + ML-KEM-768    SLH-DSA-256s             256   Hash-based Sig (lent)
+
+${BOLD}Notes :${NC}
+  hybrid-full  Seul mode avec double protection KEM + Signature post-quantiques
+               Certificat composite p256_mldsa65 (oqs-provider 0.5+)
+  slhdsa*      Signatures basées sur hash (pas de réseau), très grandes mais robustes
+               Alias liboqs : sphincssha2128ssimple / sphincssha2256ssimple
+  classic      Baseline AES-256 (Grover réduit AES-128 à ~64 bits côté quantique)
+EOF
+    exit 0
+}
+
+# =============================================================================
 # AIDE
 # =============================================================================
 usage() {
@@ -877,15 +983,20 @@ ${BOLD}MODES PRINCIPAUX :${NC}
 
 ${BOLD}OPTIONS TEST :${NC}
   --target <IP>         IP du serveur WAN cible ${RED}(obligatoire)${NC}
-  --mode <MODE>         Mode cryptographique :
-      classic           TLS 1.3 + X25519 + AES-128-GCM  (baseline)
-      mlkem512          ML-KEM-512  + AES-128-GCM  (FIPS 203 Cat.1)
-      mlkem768          ML-KEM-768  + AES-256-GCM  (FIPS 203 Cat.3)
-      mlkem1024         ML-KEM-1024 + AES-256-GCM  (FIPS 203 Cat.5)
-      hybrid            X25519 + ML-KEM-768 + AES-256-GCM (hybride NIST)
-      mldsa44           ML-DSA-44   + AES-256-GCM  (FIPS 204 Cat.2)
-      mldsa65           ML-DSA-65   + AES-256-GCM  (FIPS 204 Cat.3)
-      mldsa87           ML-DSA-87   + AES-256-GCM  (FIPS 204 Cat.5)
+  --mode <MODE>         Mode cryptographique (défaut: classic)
+                        Par ordre de priorité CNSA 2.0 :
+      hybrid-full  ★★★  X25519+ML-KEM-768 / ECDSA P-256+ML-DSA-65 / AES-256  ${CYAN}← cible CNSA 2.0${NC}
+      hybrid-kem   ★★☆  X25519+ML-KEM-768 / ECDSA P-256            / AES-256  transition hybride
+      classic      ★★☆  X25519            / ECDSA P-256            / AES-256  baseline classique
+      mlkem768     ★☆☆  ML-KEM-768        / ECDSA P-256            / AES-256  PQC pur KEM Cat.3
+      mlkem1024    ★☆☆  ML-KEM-1024       / ECDSA P-256            / AES-256  PQC pur KEM Cat.5
+      mlkem512     ★☆☆  ML-KEM-512        / ECDSA P-256            / AES-128  PQC pur KEM Cat.1
+      mldsa65      ★☆☆  X25519            / ML-DSA-65              / AES-256  PQC pur Sig Cat.3
+      mldsa44      ★☆☆  X25519            / ML-DSA-44              / AES-256  PQC pur Sig Cat.2
+      mldsa87      ★☆☆  X25519            / ML-DSA-87              / AES-256  PQC pur Sig Cat.5
+      slhdsa128    ☆☆☆  X25519+ML-KEM-768 / SLH-DSA-128s           / AES-256  hash-based (lent)
+      slhdsa256    ☆☆☆  X25519+ML-KEM-768 / SLH-DSA-256s           / AES-256  hash-based (lent)
+      (--list-modes pour le tableau complet avec les algorithmes liboqs)
   --preset <N>          Preset prédéfini 1-5 (trafic staggeré, 60s fixes) :
                           1=Secrétariat  2=Développeur  3=Manager
                           4=Commercial   5=IT Technicien
@@ -895,17 +1006,22 @@ ${BOLD}OPTIONS TEST :${NC}
   --duration <sec>      Durée de chaque profil (mode --profile, défaut: 30)
   --hs-count <N>        Nombre d'itérations pour mesure handshake (défaut: 100)
   --output <DIR>        Répertoire de sortie CSV (défaut: ./results)
+  --list-modes          Affiche le tableau détaillé des modes et quitte
 
 ${BOLD}OPTIONS SERVEUR :${NC}
   --wan-profile <p>     Profil latence WAN : fr (15ms) | eu (35ms) | us (80ms)
 
 ${BOLD}EXEMPLES :${NC}
-  # Lancer le serveur WAN (VM derrière le pare-feu)
-  sudo $0 --server --mode mlkem768 --wan-profile eu
+  # Tableau détaillé des modes
+  $0 --list-modes
 
-  # Preset 3 (Manager) — classique puis PQC, même données → comparaison valide
-  $0 --target 10.0.1.1 --mode classic  --preset 3
-  $0 --target 10.0.1.1 --mode mlkem768 --preset 3
+  # Lancer le serveur WAN (VM derrière le pare-feu)
+  sudo $0 --server --mode hybrid-full --wan-profile eu
+
+  # Preset 3 — séquence comparative recommandée CNSA 2.0
+  $0 --target 10.0.1.1 --mode classic      --preset 3
+  $0 --target 10.0.1.1 --mode hybrid-kem   --preset 3
+  $0 --target 10.0.1.1 --mode hybrid-full  --preset 3
 
   # Preset 4 (Commercial) — à lancer en parallèle avec preset 3 sur un autre PC
   $0 --target 10.0.1.1 --mode classic  --preset 4
@@ -914,11 +1030,11 @@ ${BOLD}EXEMPLES :${NC}
   python3 traffic_presets.py list
 
   # Trafic aléatoire continu — 5 min, puis passe au mode suivant
-  $0 --target 10.0.1.1 --mode classic  --random --duration 300
-  $0 --target 10.0.1.1 --mode mlkem768 --random --duration 300
+  $0 --target 10.0.1.1 --mode classic      --random --duration 300
+  $0 --target 10.0.1.1 --mode hybrid-full  --random --duration 300
 
   # Trafic aléatoire infini — Ctrl+C pour arrêter manuellement
-  $0 --target 10.0.1.1 --mode hybrid   --random
+  $0 --target 10.0.1.1 --mode hybrid-kem   --random
 
   # Trafic libre ponctuel (non staggeré, charge max simultanée)
   $0 --target 10.0.1.1 --mode classic  --profile voip,file --duration 60
@@ -962,7 +1078,10 @@ while [[ $# -gt 0 ]]; do
         --output)       OUTPUT_DIR="$2";      shift ;;
         --wan-profile)  WAN_PROFILE="$2";     shift ;;
         --server-ip)    SERVER_IP="$2";       shift ;;
-        -h|--help)      usage ;;
+        -h|--help)
+            if [[ "$ACTION" == "server" ]]; then usage_server; else usage; fi
+            ;;
+        --list-modes)   ACTION="list-modes" ;;
         *) log_warn "Option inconnue : $1 (ignorée)" ;;
     esac
     shift
@@ -972,10 +1091,11 @@ done
 # POINT D'ENTRÉE
 # =============================================================================
 case "$ACTION" in
-    install) cmd_install ;;
-    scan)    cmd_scan    "$SCAN_SUBNET" ;;
-    server)  cmd_server  "$MODE" "$WAN_PROFILE" ;;
-    collect) cmd_collect_only "$COLLECT_FILE" ;;
-    random)  cmd_random ;;
-    test)    cmd_test ;;
+    install)    cmd_install ;;
+    scan)       cmd_scan    "$SCAN_SUBNET" ;;
+    server)     cmd_server  "$MODE" "$WAN_PROFILE" ;;
+    collect)    cmd_collect_only "$COLLECT_FILE" ;;
+    random)     cmd_random ;;
+    list-modes) cmd_list_modes ;;
+    test)       cmd_test ;;
 esac
