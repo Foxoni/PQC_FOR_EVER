@@ -1004,10 +1004,11 @@ cmd_server() {
         || log_ok "Pool iperf3 prêt (10 instances)"
 
     # Serveur TLS (boucle pour accepter des connexions successives)
-    local cipher provider_arg groups_arg
+    # Note : -groups n'est pas passé côté serveur — openssl s_server ne le supporte pas
+    # sur toutes les versions. Le groupe KEM est négocié par le client dans son ClientHello.
+    local cipher provider_arg
     cipher=$(get_cipher "$mode")
     provider_arg=$(get_provider_args "$mode")
-    groups_arg=$(get_groups_arg "$mode")
 
     log_info "Démarrage TLS serveur (port $PORT_TLS, cipher: $cipher)..."
     (
@@ -1019,7 +1020,7 @@ cmd_server() {
                 -port "$PORT_TLS" \
                 -tls1_3 \
                 -ciphersuites "$cipher" \
-                $groups_arg $provider_arg \
+                $provider_arg \
                 -rev 2>&1) || {
                     # Filtrer les déconnexions normales (pas des vraies erreurs)
                     echo "$err" | grep -vqE "ACCEPT|read:errno=0|shutting down" \
