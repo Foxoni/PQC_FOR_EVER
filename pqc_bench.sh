@@ -1029,10 +1029,15 @@ cmd_server() {
         trap '_cleanup_server' EXIT INT TERM
     fi
 
+    # Nettoyer les éventuelles instances iperf3 résiduelles avant de démarrer
+    pkill -f "iperf3 -s" 2>/dev/null || true
+    sleep 0.2
+
     # Pool iperf3 serveur — une instance par port
     log_info "Démarrage pool iperf3 (ports 5201–5210)..."
     local port failed_ports=()
     for port in $(seq 5201 5210); do
+        rm -f "/tmp/iperf3_${port}.log"
         iperf3 -s -p "$port" --logfile "/tmp/iperf3_${port}.log" &
         _SERVER_PIDS+=($!)
     done
@@ -1042,9 +1047,12 @@ cmd_server() {
             failed_ports+=("$port")
         fi
     done
-    [[ ${#failed_ports[@]} -gt 0 ]] \
-        && log_warn "iperf3 : échec sur port(s) ${failed_ports[*]} (port déjà utilisé ?)" \
-        || log_ok "Pool iperf3 prêt (10 instances)"
+    if [[ ${#failed_ports[@]} -gt 0 ]]; then
+        # IFS=' ' pour joindre les ports avec des espaces (pas \n)
+        log_warn "iperf3 : échec sur port(s) $(IFS=' '; echo "${failed_ports[*]}") (port déjà utilisé ?)"
+    else
+        log_ok "Pool iperf3 prêt (10 instances)"
+    fi
 
     # Serveur TLS (boucle pour accepter des connexions successives)
     # Note : -groups n'est pas passé côté serveur — openssl s_server ne le supporte pas
