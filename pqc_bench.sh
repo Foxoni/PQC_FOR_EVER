@@ -72,7 +72,7 @@ declare -A OQS_SIG_ALG=(
     [mldsa44]="mldsa44"
     [mldsa65]="mldsa65"
     [mldsa87]="mldsa87"
-    [hybrid-full]="p256_mldsa65"            # ECDSA P-256 + ML-DSA-65 (composite)
+    [hybrid-full]="p384_mldsa65"            # ECDSA P-384 + ML-DSA-65 (composite)
     [slhdsa128]="sphincssha2128ssimple"     # SLH-DSA-128s (FIPS 205)
     [slhdsa256]="sphincssha2256ssimple"     # SLH-DSA-256s (FIPS 205)
 )
@@ -529,7 +529,7 @@ crypto_gen_certs() {
                 openssl list -signature-algorithms \
                     -provider oqsprovider -provider default 2>/dev/null \
                     | grep -i "dsa\|slh\|sphincs\|p256\|p384" || true
-                die "Algorithme '${sig_alg}' non supporté par cette version d'oqs-provider (hybrid-full nécessite ≥ 0.5)"
+                die "Algorithme '${sig_alg}' non supporté par ce build d'oqs-provider — vérifiez la liste ci-dessus"
             }
         _openssl_run req -new -x509 \
             -key "$CERT_DIR/server.key" \
@@ -1341,7 +1341,7 @@ ${CYAN}☆☆☆${NC}       slhdsa256     X25519 + ML-KEM-768    SLH-DSA-256s   
 
 ${BOLD}Notes :${NC}
   hybrid-full  Seul mode avec double protection KEM + Signature post-quantiques
-               Certificat composite p256_mldsa65 (oqs-provider 0.5+)
+               Certificat composite p384_mldsa65 (oqs-provider 0.5+)
   slhdsa*      Signatures basées sur hash (pas de réseau), très grandes mais robustes
                Alias liboqs : sphincssha2128ssimple / sphincssha2256ssimple
   classic      Baseline AES-256 (Grover réduit AES-128 à ~64 bits côté quantique)

@@ -289,7 +289,7 @@ Selection via `--mode <MODE>` (voir aussi `./pqc_bench.sh --list-modes`) :
 
 > **Notes :**
 >
-> - `hybrid-full` utilise un certificat composite `p256_mldsa65` (oqs-provider 0.5+) :
+> - `hybrid-full` utilise un certificat composite `p384_mldsa65` (oqs-provider 0.5+) :
 >   double signature ECDSA + ML-DSA dans le meme certificat.
 > - `slhdsa*` utilise les alias liboqs : `sphincssha2128ssimple` / `sphincssha2256ssimple`.
 > - `mlkem512` reste en AES-128 car son niveau de securite declare est Cat.1 (iso-classique).
