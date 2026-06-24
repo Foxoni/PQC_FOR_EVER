@@ -121,13 +121,23 @@ class VMAgent:
                 cmd += ["--duration", str(self.cfg["duration"])]
 
             self._run_start = time.time()
-            logfd      = open(self.logfile, "w")
-            self.proc  = subprocess.Popen(cmd, cwd=str(SCRIPT_DIR),
-                                          stdout=logfd,
-                                          stderr=subprocess.STDOUT)
-            logfd.close()
+            try:
+                logfd = open(self.logfile, "w")
+            except OSError as exc:
+                return {"ok": False, "error": f"impossible d'ouvrir le fichier de log : {exc}"}
+
+            try:
+                self.proc = subprocess.Popen(cmd, cwd=str(SCRIPT_DIR),
+                                             stdout=logfd,
+                                             stderr=subprocess.STDOUT)
+            except OSError as exc:
+                logfd.close()
+                return {"ok": False, "error": f"impossible de lancer pqc_bench.sh : {exc}"}
+            finally:
+                logfd.close()
+
             self.state = "running"
-            pid        = self.proc.pid
+            pid = self.proc.pid
 
         def _watch():
             self.proc.wait()
@@ -136,6 +146,8 @@ class VMAgent:
                     self.returncode = self.proc.returncode
                     self.outfile    = self._find_output_csv()
                     self.state      = "done"
+                    if self.returncode != 0:
+                        print(f"[vm_agent] pqc_bench.sh terminé avec code {self.returncode}", flush=True)
 
         threading.Thread(target=_watch, daemon=True).start()
         return {"ok": True, "state": "running", "pid": pid}
@@ -188,15 +200,24 @@ class VMAgent:
 
     def handle(self, conn):
         try:
+            conn.settimeout(15.0)
             buf = b""
             while b"\n" not in buf:
                 chunk = conn.recv(4096)
                 if not chunk:
                     return
                 buf += chunk
+                if len(buf) > 65536:
+                    resp = {"ok": False, "error": "message trop grand (>64 Ko)"}
+                    conn.sendall((json.dumps(resp) + "\n").encode())
+                    return
             req  = json.loads(buf.split(b"\n")[0])
             fn   = self._DISPATCH.get(req.get("cmd", "").upper())
             resp = fn(self, req) if fn else {"ok": False, "error": "commande inconnue"}
+        except TimeoutError:
+            resp = {"ok": False, "error": "timeout lecture commande"}
+        except json.JSONDecodeError as e:
+            resp = {"ok": False, "error": f"JSON invalide : {e}"}
         except Exception as e:
             resp = {"ok": False, "error": str(e)}
         try:
@@ -218,15 +239,28 @@ def main():
             print("Usage: vm_agent.py [--port PORT]", file=sys.stderr)
             sys.exit(1)
 
+    if not BENCH.exists():
+        print(f"[vm_agent] ERREUR : pqc_bench.sh introuvable dans {SCRIPT_DIR}", file=sys.stderr)
+        sys.exit(1)
+
     agent = VMAgent()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("0.0.0.0", port))
+        try:
+            srv.bind(("0.0.0.0", port))
+        except OSError as exc:
+            print(f"[vm_agent] ERREUR bind :{port} → {exc}", file=sys.stderr)
+            print(f"[vm_agent] Le port {port} est déjà utilisé ? Essayez --port <autre>", file=sys.stderr)
+            sys.exit(1)
         srv.listen(16)
         print(f"[vm_agent] ecoute :{port}  bench={BENCH}")
 
         while True:
-            conn, _addr = srv.accept()
+            try:
+                conn, addr = srv.accept()
+            except OSError as exc:
+                print(f"[vm_agent] accept() échoué : {exc}", file=sys.stderr)
+                continue
             threading.Thread(target=agent.handle, args=(conn,), daemon=True).start()
 
 

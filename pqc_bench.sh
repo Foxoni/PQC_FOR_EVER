@@ -127,15 +127,27 @@ timestamp()     { date +"%Y%m%dT%H%M%S"; }
 now_ms()        { date +%s%3N; }  # epoch en millisecondes (GNU date, Linux)
 
 local_ip() {
-    ip route get 1.1.1.1 2>/dev/null \
-        | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' \
-    || hostname -I | awk '{print $1}'
+    local ip
+    ip=$(ip route get 1.1.1.1 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+    if [[ -z "$ip" ]]; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    if [[ -z "$ip" ]]; then
+        log_warn "Impossible de détecter l'IP locale — utilisation de 127.0.0.1"
+        ip="127.0.0.1"
+    fi
+    echo "$ip"
 }
 
 net_iface() {
-    ip route get 1.1.1.1 2>/dev/null \
-        | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' \
-    || echo "eth0"
+    local iface
+    iface=$(ip route get 1.1.1.1 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+    if [[ -z "$iface" ]]; then
+        iface=$(ip route show default 2>/dev/null | awk '/dev/ {print $5; exit}')
+    fi
+    echo "${iface:-eth0}"
 }
 
 # =============================================================================
@@ -146,17 +158,20 @@ cmd_install() {
     log_section "Installation des dépendances"
     require_root
 
-    apt-get update -qq
+    apt-get update -qq || log_warn "apt-get update a échoué — les paquets peuvent être obsolètes"
     apt-get install -y \
         nmap iperf3 hping3 fping tcpdump tshark \
         openssl python3 python3-pip \
         curl wget git cmake gcc g++ \
         libtool libssl-dev pkg-config \
-        iproute2 net-tools bc netcat-openbsd
+        iproute2 net-tools bc netcat-openbsd \
+        || die "apt-get install a échoué — vérifiez votre connexion et vos sources APT"
 
     # Packages Python
-    pip3 install --quiet scapy psutil 2>/dev/null \
-        || pip3 install --quiet --break-system-packages scapy psutil
+    if ! pip3 install --quiet scapy psutil 2>/dev/null; then
+        pip3 install --quiet --break-system-packages scapy psutil \
+            || log_warn "pip3 install échoué — scapy/psutil peuvent être absents (monitoring CPU/RAM et trafic msg désactivés)"
+    fi
 
     if openssl list -providers 2>/dev/null | grep -q oqsprovider; then
         log_ok "oqs-provider déjà installé"
@@ -170,11 +185,13 @@ cmd_install() {
 _build_oqs_provider() {
     local build="/tmp/oqs_build_$$"
     mkdir -p "$build"
+    local log_file="/tmp/oqs_build_$$.log"
 
-    log_info "Compilation de liboqs (Open Quantum Safe)..."
+    log_info "Compilation de liboqs (Open Quantum Safe) — peut prendre 5-10 min..."
     git clone --depth 1 \
         https://github.com/open-quantum-safe/liboqs.git \
-        "$build/liboqs" 2>/dev/null
+        "$build/liboqs" >> "$log_file" 2>&1 \
+        || die "git clone liboqs échoué (voir $log_file)"
 
     cmake -S "$build/liboqs" -B "$build/liboqs/build" -Wno-dev \
         -DOQS_DIST_BUILD=ON \
@@ -182,23 +199,28 @@ _build_oqs_provider() {
         -DOQS_BUILD_ONLY_LIB=ON \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DCMAKE_BUILD_TYPE=Release \
-        > /dev/null 2>&1
-    make -C "$build/liboqs/build" -j"$(nproc)" install > /dev/null 2>&1
+        >> "$log_file" 2>&1 \
+        || die "cmake liboqs échoué (voir $log_file)"
+    make -C "$build/liboqs/build" -j"$(nproc)" install >> "$log_file" 2>&1 \
+        || die "make liboqs échoué (voir $log_file)"
     ldconfig
 
     log_info "Compilation de oqs-provider pour OpenSSL 3..."
     git clone --depth 1 \
         https://github.com/open-quantum-safe/oqs-provider.git \
-        "$build/oqs-provider" 2>/dev/null
+        "$build/oqs-provider" >> "$log_file" 2>&1 \
+        || die "git clone oqs-provider échoué (voir $log_file)"
 
     cmake -S "$build/oqs-provider" -B "$build/oqs-provider/build" -Wno-dev \
         -Dliboqs_DIR=/usr/local/lib/cmake/liboqs \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
-        > /dev/null 2>&1
-    make -C "$build/oqs-provider/build" -j"$(nproc)" install > /dev/null 2>&1
+        >> "$log_file" 2>&1 \
+        || die "cmake oqs-provider échoué (voir $log_file)"
+    make -C "$build/oqs-provider/build" -j"$(nproc)" install >> "$log_file" 2>&1 \
+        || die "make oqs-provider échoué (voir $log_file)"
 
     _register_oqs_provider
-    rm -rf "$build"
+    rm -rf "$build" "$log_file"
     log_ok "oqs-provider compilé et installé"
 }
 
@@ -266,10 +288,19 @@ check_network_caps() {
 # Appeler net_ping_start avant l'événement, net_ping_stop après.
 net_ping_start() {
     local target="$1" duration="${2:-60}"
+    if ! has_cmd ping; then
+        log_warn "ping absent — métriques RTT indisponibles"
+        _PING_PID=0; return
+    fi
     _PING_FILE="/tmp/pqc_ping_$$.txt"
     local count=$(( duration * 2 + 30 ))   # 2 pings/s + marge
-    ping -c "$count" -i 0.5 "$target" > "$_PING_FILE" 2>/dev/null &
+    ping -c "$count" -i 0.5 "$target" > "$_PING_FILE" 2>&1 &
     _PING_PID=$!
+    sleep 0.2
+    if ! kill -0 "$_PING_PID" 2>/dev/null; then
+        log_warn "ping vers $target n'a pas démarré (hôte injoignable ?)"
+        _PING_PID=0
+    fi
 }
 
 net_ping_stop() {
@@ -308,10 +339,19 @@ else:
 # Pertinent uniquement sur voip/stream — utilisé au niveau du run global.
 net_jitter_start() {
     local target="$1" duration="${2:-60}"
+    if ! has_cmd iperf3; then
+        log_warn "iperf3 absent — métriques jitter/perte UDP indisponibles"
+        _JITTER_PID=0; return
+    fi
     _JITTER_FILE="/tmp/pqc_jitter_$$.json"
     iperf3 -c "$target" -p "$PORT_IPERF_VOIP" -u -b 1M -t "$duration" \
-        --json -i 0 > "$_JITTER_FILE" 2>/dev/null &
+        --json -i 0 > "$_JITTER_FILE" 2>&1 &
     _JITTER_PID=$!
+    sleep 0.2
+    if ! kill -0 "$_JITTER_PID" 2>/dev/null; then
+        log_warn "iperf3 UDP vers $target:$PORT_IPERF_VOIP n'a pas démarré (serveur joignable ?)"
+        _JITTER_PID=0
+    fi
 }
 
 net_jitter_stop() {
@@ -463,6 +503,15 @@ is_kem_mode() {
     [[ "$1" == mlkem* || "$1" == "hybrid-kem" || "$1" == "hybrid-full" || "$1" == slhdsa* ]]
 }
 
+_openssl_run() {
+    local err
+    if ! err=$(openssl "$@" 2>&1); then
+        log_error "openssl $* → échec"
+        log_error "$err"
+        return 1
+    fi
+}
+
 crypto_gen_certs() {
     local mode="$1"
     mkdir -p "$CERT_DIR"
@@ -472,23 +521,33 @@ crypto_gen_certs() {
 
     if [[ -n "$sig_alg" ]]; then
         # mldsa*, hybrid-full, slhdsa* : certificat OQS (pure ou composite)
-        openssl genpkey -algorithm "$sig_alg" \
+        _openssl_run genpkey -algorithm "$sig_alg" \
             -provider oqsprovider -provider default \
-            -out "$CERT_DIR/server.key" 2>/dev/null
-        openssl req -new -x509 \
+            -out "$CERT_DIR/server.key" \
+            || {
+                log_warn "Algorithmes de signature disponibles dans oqs-provider :"
+                openssl list -signature-algorithms \
+                    -provider oqsprovider -provider default 2>/dev/null \
+                    | grep -i "dsa\|slh\|sphincs\|p256\|p384" || true
+                die "Algorithme '${sig_alg}' non supporté par cette version d'oqs-provider (hybrid-full nécessite ≥ 0.5)"
+            }
+        _openssl_run req -new -x509 \
             -key "$CERT_DIR/server.key" \
             -out "$CERT_DIR/server.crt" \
             -days 1 -subj "/CN=pqc-bench" \
-            -provider oqsprovider -provider default 2>/dev/null
+            -provider oqsprovider -provider default \
+            || die "Génération du certificat OQS impossible"
     else
         # classic, mlkem*, hybrid-kem : ECDSA P-256
         # (ML-KEM gère uniquement l'échange de clé, pas la signature)
-        openssl ecparam -name prime256v1 -genkey -noout \
-            -out "$CERT_DIR/server.key" 2>/dev/null
-        openssl req -new -x509 \
+        _openssl_run ecparam -name prime256v1 -genkey -noout \
+            -out "$CERT_DIR/server.key" \
+            || die "Génération de la clé ECDSA P-256 impossible"
+        _openssl_run req -new -x509 \
             -key "$CERT_DIR/server.key" \
             -out "$CERT_DIR/server.crt" \
-            -days 1 -subj "/CN=pqc-bench" 2>/dev/null
+            -days 1 -subj "/CN=pqc-bench" \
+            || die "Génération du certificat ECDSA impossible"
     fi
 
     KEY_SIZE=$(wc -c < "$CERT_DIR/server.key")
@@ -549,10 +608,19 @@ measure_handshake() {
     done
     CONN_ERRORS=$errors
 
+    if [[ "$errors" -eq "$count" ]]; then
+        rm -f "$timing_file"
+        die "Toutes les connexions TLS ont échoué (${errors}/${count}) — vérifiez que le serveur tourne en mode '${MODE}' sur ${TARGET}:${PORT_TLS}"
+    fi
+
     # Calcul des percentiles via Python
-    read -r HS_MIN HS_AVG HS_MAX HS_P99 < <(
-        python3 "$SCRIPT_PY" stats "$timing_file"
-    )
+    local stats_out
+    if stats_out=$(python3 "$SCRIPT_PY" stats "$timing_file" 2>/dev/null); then
+        read -r HS_MIN HS_AVG HS_MAX HS_P99 <<< "$stats_out"
+    else
+        log_warn "Calcul des statistiques handshake échoué — valeurs mises à 0"
+        HS_MIN=0; HS_AVG=0; HS_MAX=0; HS_P99=0
+    fi
     rm -f "$timing_file"
 
     log_ok "Handshake ─ min:${HS_MIN}ms moy:${HS_AVG}ms max:${HS_MAX}ms p99:${HS_P99}ms | erreurs:${errors}/${count}"
@@ -578,9 +646,13 @@ stop_monitor() {
     MONITOR_PID=""
 
     if [[ -f "$MONITOR_FILE" ]]; then
-        read -r CPU_AVG RAM_AVG < <(
-            python3 "$SCRIPT_PY" avgres "$MONITOR_FILE"
-        )
+        local result
+        if result=$(python3 "$SCRIPT_PY" avgres "$MONITOR_FILE" 2>/dev/null); then
+            read -r CPU_AVG RAM_AVG <<< "$result"
+        else
+            log_warn "Lecture monitoring CPU/RAM échouée — valeurs mises à 0"
+            CPU_AVG=0; RAM_AVG=0
+        fi
         rm -f "$MONITOR_FILE"
     fi
     log_info "CPU moy: ${CPU_AVG}% | RAM moy: ${RAM_AVG} MB"
@@ -752,7 +824,12 @@ collect_preset_metrics() {
               "$out_file" <<'EOF'
 import json, sys, csv
 
-data   = json.load(open(sys.argv[1]))
+try:
+    data = json.load(open(sys.argv[1]))
+except (FileNotFoundError, json.JSONDecodeError) as exc:
+    print(f"[ERR] Impossible de lire {sys.argv[1]}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
 ts, vm_ip, target = sys.argv[2], sys.argv[3], sys.argv[4]
 mode, cipher, aes_bits = sys.argv[5], sys.argv[6], sys.argv[7]
 cpu, ram = sys.argv[8], sys.argv[9]
@@ -778,38 +855,45 @@ fields = [
     "TCP_connect_ms","TTFB_ms","Connexions_echec",
 ]
 
-with open(outfile, "w", newline="") as f:
-    w = csv.DictWriter(f, fieldnames=fields)
-    w.writeheader()
-    for e in data.get("events", []):
-        profil = e.get("type", "?")
-        is_udp = profil in UDP_PROFILES
-        w.writerow({
-            "Horodatage": ts, "VM_IP": vm_ip, "Serveur_IP": target,
-            "Mode": mode, "Type_test": data.get("schedule", "?"),
-            "Profil": profil, "Libelle": e.get("label", ""),
-            "Suite_chiffrement": cipher, "AES_bits": aes_bits,
-            "Delai_planifie_s": e.get("planned_delay_s", 0),
-            "Duree_reelle_s": e.get("actual_duration_s", 0),
-            "Handshake_ms": e.get("handshake_ms", 0),
-            "Debit_Mbps": e.get("throughput_mbps", 0),
-            "CPU_moy_pct": cpu, "RAM_moy_Mo": ram,
-            "Retransmissions_pct": e.get("retransmit_pct", 0),
-            "Taille_cle_octets": key_sz, "Taille_cert_octets": cert_sz,
-            "Ping_moy_ms": ping_moy, "Ping_min_ms": ping_min,
-            "Ping_max_ms": ping_max, "Ping_p99_ms": ping_p99,
-            "Jitter_ms":           net_jitter if is_udp else -1,
-            "Packet_loss_pct":     loss_pct,
-            "Packet_loss_UDP_pct": loss_udp_pct if is_udp else -1,
-            "Fragmentation_pct":   frag_pct,
-            "Handshake_paquets":   hs_pkts,
-            "Handshake_octets":    hs_bytes,
-            "TCP_connect_ms":      tcp_connect,
-            "TTFB_ms":             ttfb,
-            "Connexions_echec":    conn_err,
-        })
+try:
+    with open(outfile, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for e in data.get("events", []):
+            profil = e.get("type", "?")
+            is_udp = profil in UDP_PROFILES
+            w.writerow({
+                "Horodatage": ts, "VM_IP": vm_ip, "Serveur_IP": target,
+                "Mode": mode, "Type_test": data.get("schedule", "?"),
+                "Profil": profil, "Libelle": e.get("label", ""),
+                "Suite_chiffrement": cipher, "AES_bits": aes_bits,
+                "Delai_planifie_s": e.get("planned_delay_s", 0),
+                "Duree_reelle_s": e.get("actual_duration_s", 0),
+                "Handshake_ms": e.get("handshake_ms", 0),
+                "Debit_Mbps": e.get("throughput_mbps", 0),
+                "CPU_moy_pct": cpu, "RAM_moy_Mo": ram,
+                "Retransmissions_pct": e.get("retransmit_pct", 0),
+                "Taille_cle_octets": key_sz, "Taille_cert_octets": cert_sz,
+                "Ping_moy_ms": ping_moy, "Ping_min_ms": ping_min,
+                "Ping_max_ms": ping_max, "Ping_p99_ms": ping_p99,
+                "Jitter_ms":           net_jitter if is_udp else -1,
+                "Packet_loss_pct":     loss_pct,
+                "Packet_loss_UDP_pct": loss_udp_pct if is_udp else -1,
+                "Fragmentation_pct":   frag_pct,
+                "Handshake_paquets":   hs_pkts,
+                "Handshake_octets":    hs_bytes,
+                "TCP_connect_ms":      tcp_connect,
+                "TTFB_ms":             ttfb,
+                "Connexions_echec":    conn_err,
+            })
+except OSError as exc:
+    print(f"[ERR] Écriture CSV {outfile}: {exc}", file=sys.stderr)
+    sys.exit(1)
 EOF
 
+    if [[ $? -ne 0 ]]; then
+        die "collect_preset_metrics : écriture du CSV échouée ($out_file)"
+    fi
     log_ok "Métriques sauvegardées : $out_file"
 }
 
@@ -822,15 +906,24 @@ wan_apply() {
     local profile="${1:-eu}"
     _WAN_IFACE=$(net_iface)
 
+    if [[ -z "$_WAN_IFACE" ]]; then
+        log_warn "Interface réseau introuvable — simulation WAN désactivée"
+        return 0
+    fi
+
     local delay="${WAN_DELAY[$profile]:-35ms}"
     local jitter="${WAN_JITTER[$profile]:-8ms}"
     local loss="${WAN_LOSS[$profile]:-0.1%}"
 
-    # Supprime une règle existante avant d'appliquer
     tc qdisc del dev "$_WAN_IFACE" root 2>/dev/null || true
-    tc qdisc add dev "$_WAN_IFACE" root netem \
-        delay "$delay" "$jitter" distribution normal \
-        loss "$loss"
+    local err
+    if ! err=$(tc qdisc add dev "$_WAN_IFACE" root netem \
+            delay "$delay" "$jitter" distribution normal \
+            loss "$loss" 2>&1); then
+        log_warn "tc netem échoué sur $_WAN_IFACE : $err"
+        log_warn "Simulation WAN désactivée (netem/iproute2 manquant ou droits insuffisants)"
+        return 0
+    fi
 
     log_ok "Latence WAN ($profile) sur $_WAN_IFACE : delay=$delay ±$jitter, perte=$loss"
 }
@@ -895,12 +988,20 @@ cmd_server() {
 
     # Pool iperf3 serveur — une instance par port
     log_info "Démarrage pool iperf3 (ports 5201–5210)..."
-    local port
+    local port failed_ports=()
     for port in $(seq 5201 5210); do
-        iperf3 -s -p "$port" \
-            --logfile "/tmp/iperf3_${port}.log" &
+        iperf3 -s -p "$port" --logfile "/tmp/iperf3_${port}.log" &
         _SERVER_PIDS+=($!)
     done
+    sleep 0.5   # laisser les instances démarrer
+    for port in $(seq 5201 5210); do
+        if grep -q "error\|failed\|bind" "/tmp/iperf3_${port}.log" 2>/dev/null; then
+            failed_ports+=("$port")
+        fi
+    done
+    [[ ${#failed_ports[@]} -gt 0 ]] \
+        && log_warn "iperf3 : échec sur port(s) ${failed_ports[*]} (port déjà utilisé ?)" \
+        || log_ok "Pool iperf3 prêt (10 instances)"
 
     # Serveur TLS (boucle pour accepter des connexions successives)
     local cipher provider_arg groups_arg
@@ -912,18 +1013,28 @@ cmd_server() {
     (
         # shellcheck disable=SC2086
         while true; do
-            openssl s_server \
+            err=$(openssl s_server \
                 -cert "$CERT_DIR/server.crt" \
                 -key  "$CERT_DIR/server.key" \
                 -port "$PORT_TLS" \
                 -tls1_3 \
                 -ciphersuites "$cipher" \
                 $groups_arg $provider_arg \
-                -rev 2>/dev/null || true
+                -rev 2>&1) || {
+                    # Filtrer les déconnexions normales (pas des vraies erreurs)
+                    echo "$err" | grep -vqE "ACCEPT|read:errno=0|shutting down" \
+                        && echo "[WARN] openssl s_server: $err" >&2
+                }
             sleep 0.05
         done
     ) &
     _SERVER_PIDS+=($!)
+
+    # Vérifier que le serveur TLS a bien démarré
+    sleep 0.3
+    if ! ss -tlnp 2>/dev/null | grep -q ":${PORT_TLS}"; then
+        die "Le serveur TLS n'a pas pu écouter sur le port $PORT_TLS (port déjà utilisé ou erreur OpenSSL)"
+    fi
 
     # Port marqueur (détection de déploiement par --scan)
     nc -lk -p "$PORT_MARKER" >/dev/null 2>&1 &
@@ -933,7 +1044,8 @@ cmd_server() {
     local bind_ip="${SERVER_IP:-$(local_ip)}"
     printf "mode=%s\nip=%s\n" "$mode" "$bind_ip" > "${SCRIPT_DIR}/.server_mode"
 
-    log_ok "Serveur prêt sur $(local_ip) — Ctrl+C pour arrêter"
+    log_ok "Serveur prêt — IP: ${bind_ip} | TLS: :${PORT_TLS} | iperf3: :5201-5210"
+    log_ok "Ctrl+C pour arrêter"
     wait
 }
 
@@ -964,20 +1076,26 @@ cmd_test() {
         net_jitter_start "$TARGET" 70
 
         log_info "Exécution preset $PRESET (60s, événements staggerés)..."
-        python3 "$SCRIPT_DIR/traffic_presets.py" run \
-            --preset "$PRESET" \
-            --target "$TARGET" \
-            --mode   "$MODE" \
-            --port-tls "$PORT_TLS" \
-            --cert   "$CERT_DIR/server.crt" \
-            --duration 60 \
-            --output "$preset_json"
+        local preset_err
+        if ! preset_err=$(python3 "$SCRIPT_DIR/traffic_presets.py" run \
+                --preset "$PRESET" \
+                --target "$TARGET" \
+                --mode   "$MODE" \
+                --port-tls "$PORT_TLS" \
+                --cert   "$CERT_DIR/server.crt" \
+                --duration 60 \
+                --output "$preset_json" 2>&1); then
+            log_warn "traffic_presets.py run a signalé une erreur : $preset_err"
+        fi
 
         net_jitter_stop
         net_ping_stop
         stop_monitor
 
-        # Lecture du label du preset pour nommer le fichier CSV
+        if [[ ! -f "$preset_json" ]]; then
+            die "Fichier de résultats absent après le preset ($preset_json) — test abandonné"
+        fi
+
         local schedule_label
         schedule_label=$(python3 -c \
             "import json,sys; d=json.load(open(sys.argv[1])); \

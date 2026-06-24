@@ -83,6 +83,7 @@ class ServerCLI:
         """Envoie req JSON a l'agent ip:AGENT_PORT, renvoie la reponse JSON."""
         try:
             with socket.create_connection((ip, AGENT_PORT), timeout=timeout) as s:
+                s.settimeout(timeout)
                 s.sendall((json.dumps(req) + "\n").encode())
                 buf = b""
                 while b"\n" not in buf:
@@ -90,7 +91,11 @@ class ServerCLI:
                     if not chunk:
                         break
                     buf += chunk
+                    if len(buf) > 10 * 1024 * 1024:   # 10 Mo max
+                        return {"ok": False, "error": "reponse trop grande (>10 Mo)"}
                 return json.loads(buf.split(b"\n")[0])
+        except json.JSONDecodeError as e:
+            return {"ok": False, "error": f"JSON invalide dans la reponse : {e}"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -302,7 +307,10 @@ class ServerCLI:
         if "--lines" in args:
             idx = args.index("--lines")
             if idx + 1 < len(args):
-                n = int(args[idx + 1])
+                try:
+                    n = int(args[idx + 1])
+                except ValueError:
+                    print(f"[WARN] --lines '{args[idx + 1]}' invalide — utilisation de 50")
             args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
 
         target = args[0] if args else "all"
@@ -498,9 +506,19 @@ class ServerCLI:
             # Sauvegarde individuelle avec timestamp pour ne pas ecraser
             ts_tag  = datetime.now().strftime("%Y%m%dT%H%M%S")
             indiv   = RESULTS_DIR / f"raw_{ip.replace('.', '_')}_{ts_tag}.csv"
-            indiv.write_text(content)
+            try:
+                indiv.write_text(content)
+            except OSError as exc:
+                print(f"  {ip}: impossible d'ecrire {indiv} : {exc}")
+                errors.append(ip)
+                continue
 
-            rows = list(csv.DictReader(io.StringIO(content)))
+            try:
+                rows = list(csv.DictReader(io.StringIO(content)))
+            except Exception as exc:
+                print(f"  {ip}: CSV malformé ({exc})")
+                errors.append(ip)
+                continue
             if not rows:
                 print(f"  {ip}: aucune donnee"); continue
 
@@ -534,10 +552,14 @@ class ServerCLI:
         idx     = self._next_master_index(mode)
         outfile = RESULTS_DIR / f"master_{mode}_{idx}.csv"
 
-        with open(outfile, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=self._MASTER_FIELDS, extrasaction="ignore")
-            w.writeheader()
-            w.writerows(master_rows)
+        try:
+            with open(outfile, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=self._MASTER_FIELDS, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(master_rows)
+        except OSError as exc:
+            print(f"[ERR] Impossible d'ecrire {outfile} : {exc}")
+            return
 
         print(f"\nMaster CSV: {outfile}")
         print(f"  {len(vm_data)} VM(s), {len(vm_summaries)} ligne(s) VM + lignes GLOBAL")
@@ -562,7 +584,8 @@ class ServerCLI:
         for mpath in masters:
             try:
                 rows = list(csv.DictReader(open(mpath)))
-            except OSError:
+            except (OSError, Exception):
+                print(f"[WARN] Lecture ignorée : {mpath.name}")
                 continue
             for row in rows:
                 src = row.get("Source", "")
@@ -574,10 +597,14 @@ class ServerCLI:
             print("Aucune ligne GLOBAL_MOY trouvee dans les master CSV."); return
 
         fields = ["Fichier"] + self._MASTER_FIELDS
-        with open(outfile, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-            w.writeheader()
-            w.writerows(compare_rows)
+        try:
+            with open(outfile, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(compare_rows)
+        except OSError as exc:
+            print(f"[ERR] Impossible d'ecrire {outfile} : {exc}")
+            return
 
         print(f"Comparatif: {outfile}  ({len(compare_rows)} ligne(s) sur {len(masters)} master(s))")
 
