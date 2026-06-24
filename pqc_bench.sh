@@ -482,15 +482,17 @@ get_aes_bits() {
 }
 
 get_provider_args() {
+    # Un token par ligne pour rester compatible avec IFS=$'\n\t' (pas de split sur espace)
     case "$1" in
-        classic) echo "" ;;
-        *)       echo "-provider oqsprovider -provider default" ;;
+        classic) : ;;
+        *) printf '%s\n' -provider oqsprovider -provider default ;;
     esac
 }
 
 get_groups_arg() {
     local grp="${OQS_KEM_GROUP[$1]:-}"
-    [[ -n "$grp" ]] && echo "-groups $grp" || echo ""
+    # Un token par ligne pour rester compatible avec IFS=$'\n\t'
+    [[ -n "$grp" ]] && printf '%s\n' -groups "$grp" || true
 }
 
 # Vrai si le mode utilise un certificat OQS (signature post-quantique ou hybride)
