@@ -43,6 +43,7 @@ PORT_IPERF_VOIP=5202
 PORT_IPERF_STREAM=5203
 PORT_IPERF_WEB=5204
 PORT_IPERF_MSG=5205
+PORT_IPERF_JITTER=5210  # port dédié mesure jitter (ne partage pas avec les profils trafic)
 # Le pool serveur écoute de 5201 à 5210 (une instance par port)
 
 # =============================================================================
@@ -271,12 +272,22 @@ check_network_caps() {
     has_cmd fping  && CAN_FPING=true   || CAN_FPING=false
     has_cmd tshark && CAN_TSHARK=true  || CAN_TSHARK=false
     has_cmd curl   && CAN_CURL=true    || CAN_CURL=false
-    # Capture réseau = tshark disponible ET droits root (CAP_NET_RAW)
-    if $CAN_TSHARK && [[ $EUID -eq 0 ]]; then
+    # Capture réseau = tshark disponible ET (root OU CAP_NET_RAW sur l'exécutable)
+    local has_cap=false
+    if [[ $EUID -eq 0 ]]; then
+        has_cap=true
+    elif has_cmd getcap && getcap "$(command -v tshark)" 2>/dev/null | grep -q "cap_net_raw"; then
+        has_cap=true
+    fi
+    if $CAN_TSHARK && $has_cap; then
         CAN_CAPTURE=true
     else
         CAN_CAPTURE=false
-        $CAN_TSHARK && log_warn "tshark présent mais non-root → capture réseau désactivée (sudo requis)"
+        if $CAN_TSHARK; then
+            log_warn "tshark présent mais droits insuffisants → capture désactivée"
+            log_warn "  Option A : sudo python3 vm_agent.py (ou sudo ./pqc_bench.sh --test ...)"
+            log_warn "  Option B : sudo setcap cap_net_raw,cap_net_admin=eip \$(which tshark)"
+        fi
     fi
 }
 
@@ -304,7 +315,8 @@ net_ping_start() {
 }
 
 net_ping_stop() {
-    [[ "$_PING_PID" -gt 0 ]] && { kill "$_PING_PID" 2>/dev/null; wait "$_PING_PID" 2>/dev/null || true; }
+    # SIGINT (pas SIGTERM) pour que ping imprime son résumé statistique avant de quitter
+    [[ "$_PING_PID" -gt 0 ]] && { kill -INT "$_PING_PID" 2>/dev/null; wait "$_PING_PID" 2>/dev/null || true; }
     _PING_PID=0
     if [[ ! -f "$_PING_FILE" ]]; then
         NET_PING_MOY=-1; NET_PING_MIN=-1; NET_PING_MAX=-1; NET_PING_P99=-1; NET_LOSS_PCT=-1
@@ -344,12 +356,13 @@ net_jitter_start() {
         _JITTER_PID=0; return
     fi
     _JITTER_FILE="/tmp/pqc_jitter_$$.json"
-    iperf3 -c "$target" -p "$PORT_IPERF_VOIP" -u -b 1M -t "$duration" \
+    # PORT_IPERF_JITTER=5210 — port dédié, ne partage pas avec le profil voip (5202)
+    iperf3 -c "$target" -p "$PORT_IPERF_JITTER" -u -b 1M -t "$duration" \
         --json -i 0 > "$_JITTER_FILE" 2>&1 &
     _JITTER_PID=$!
     sleep 0.2
     if ! kill -0 "$_JITTER_PID" 2>/dev/null; then
-        log_warn "iperf3 UDP vers $target:$PORT_IPERF_VOIP n'a pas démarré (serveur joignable ?)"
+        log_warn "iperf3 UDP jitter vers $target:$PORT_IPERF_JITTER échoué — UDP bloqué par firewall ? (ufw allow 5210/udp)"
         _JITTER_PID=0
     fi
 }
@@ -402,10 +415,12 @@ measure_ttfb() {
     local target="$1" port="${2:-$PORT_TLS}"
     if ! $CAN_CURL; then TTFB_MS=-1; return; fi
     local raw
+    # --insecure : curl n'a pas oqs-provider chargé et ne peut pas vérifier les certs OQS
+    # On mesure le temps de handshake TLS, pas la chaîne de confiance
     raw=$(curl -sk --connect-timeout 3 \
         -o /dev/null \
         -w "%{time_appconnect}" \
-        --cacert "$CERT_DIR/server.crt" \
+        --insecure \
         "https://${target}:${port}/" \
         2>/dev/null || echo -1)
     TTFB_MS=$(python3 -c "
