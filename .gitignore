@@ -11,6 +11,10 @@ iperf_*.json
 handshake_timing.txt
 .server_mode
 
+# ─── Captures reseau (peuvent etre volumineuses et contenir du trafic brut) ──
+*.pcap
+*.pcapng
+
 # ─── Certificats et cles privees (JAMAIS dans git) ───────────────────────────
 *.pem
 *.key

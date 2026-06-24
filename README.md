@@ -58,15 +58,33 @@ pqc_bench/
 
 ### Systeme (Debian / Ubuntu)
 
+Paquets obligatoires :
+
 ```bash
 sudo apt install -y \
-    nmap iperf3 hping3 tcpdump tshark \
-    openssl python3 python3-pip \
+    nmap iperf3 tcpdump \
+    openssl python3 python3-pip curl \
     cmake gcc g++ libtool libssl-dev pkg-config \
     iproute2 net-tools bc netcat-openbsd git
 
 pip3 install psutil
 ```
+
+Paquets optionnels (metriques reseau avancees) :
+
+```bash
+sudo apt install -y hping3 tshark fping
+```
+
+| Outil | Metriques activees | Droits requis |
+| --- | --- | --- |
+| `hping3` | `TCP_connect_ms`, `Ping_p99_ms` | aucun |
+| `tshark` | `Fragmentation_pct`, `Handshake_paquets`, `Handshake_octets` | **root** (CAP_NET_RAW) |
+| `fping` | fallback si hping3 absent | aucun |
+| `curl` | `TTFB_ms` | aucun |
+
+> Si un outil est absent ou que les droits manquent, les colonnes correspondantes sont remplies
+> avec `-1` (convention "non mesure") sans faire echouer le test.
 
 ### OpenSSL 3.x + oqs-provider (support PQC)
 
@@ -379,6 +397,9 @@ Le serveur lance :
 --server --help       Affiche l'aide serveur avec la liste des modes valides
 ```
 
+> Les metriques de capture reseau (`Fragmentation_pct`, `Handshake_paquets`, `Handshake_octets`)
+> necessitent `tshark` et l'execution en `sudo`. Sans ces droits, les colonnes affichent `-1`.
+
 ---
 
 ## Format de sortie CSV
@@ -395,26 +416,45 @@ compare_{ts}.csv                    # Comparatif inter-modes (commande compare)
 
 ### Colonnes du CSV brut (par evenement)
 
-| Colonne | Description |
-| --- | --- |
-| `Horodatage` | Timestamp du test |
-| `VM_IP` | IP de la VM cliente |
-| `Serveur_IP` | IP du serveur WAN cible |
-| `Mode` | Mode cryptographique teste |
-| `Type_test` | Type de test (preset_1, preset_2...) |
-| `Profil` | Profil de trafic de l'evenement (msg, web, file, voip, stream) |
-| `Libelle` | Description lisible de l'evenement |
-| `Suite_chiffrement` | Suite TLS negociee |
-| `AES_bits` | Taille de cle AES (128 ou 256) |
-| `Delai_planifie_s` | Heure de declenchement dans le preset (secondes) |
-| `Duree_reelle_s` | Duree effective de l'evenement |
-| `Handshake_ms` | Duree du handshake TLS pour cet evenement (ms) |
-| `Debit_Mbps` | Debit mesure par iperf3 (Mbps) |
-| `CPU_moy_pct` | CPU moyen de la VM pendant le test |
-| `RAM_moy_Mo` | RAM utilisee pendant le test (Mo) |
-| `Retransmissions_pct` | Taux de retransmissions TCP |
-| `Taille_cle_octets` | Taille de la cle privee (octets) |
-| `Taille_cert_octets` | Taille du certificat (octets) |
+| Colonne | Description | Outil requis |
+| --- | --- | --- |
+| `Horodatage` | Timestamp du test | — |
+| `VM_IP` | IP de la VM cliente | — |
+| `Serveur_IP` | IP du serveur WAN cible | — |
+| `Mode` | Mode cryptographique teste | — |
+| `Type_test` | Type de test (preset_1, preset_2...) | — |
+| `Profil` | Profil de trafic de l'evenement (msg, web, file, voip, stream) | — |
+| `Libelle` | Description lisible de l'evenement | — |
+| `Suite_chiffrement` | Suite TLS negociee | — |
+| `AES_bits` | Taille de cle AES (128 ou 256) | — |
+| `Delai_planifie_s` | Heure de declenchement dans le preset (secondes) | — |
+| `Duree_reelle_s` | Duree effective de l'evenement | — |
+| `Handshake_ms` | Duree du handshake TLS pour cet evenement (ms) | — |
+| `Debit_Mbps` | Debit mesure par iperf3 (Mbps) | — |
+| `CPU_moy_pct` | CPU moyen de la VM pendant le test | — |
+| `RAM_moy_Mo` | RAM utilisee pendant le test (Mo) | — |
+| `Retransmissions_pct` | Taux de retransmissions TCP | — |
+| `Taille_cle_octets` | Taille de la cle privee (octets) | — |
+| `Taille_cert_octets` | Taille du certificat (octets) | — |
+| **Metriques reseau — mesures pendant l'evenement** | | |
+| `Ping_moy_ms` | RTT moyen pendant le trafic (ping en parallele) | ping |
+| `Ping_min_ms` | RTT minimum | ping |
+| `Ping_max_ms` | RTT maximum | ping |
+| `Ping_p99_ms` | RTT 99e percentile | hping3 / ping |
+| `Jitter_ms` | Variation de latence UDP — voip et stream uniquement, -1 sinon | iperf3 |
+| `Packet_loss_pct` | Taux de perte global (ICMP) | ping |
+| `Packet_loss_UDP_pct` | Taux de perte UDP — voip et stream uniquement, -1 sinon | iperf3 |
+| **Metriques handshake reseau — capture du premier handshake** | | |
+| `Fragmentation_pct` | % de paquets fragmentes pendant le handshake TLS | tshark + sudo |
+| `Handshake_paquets` | Nombre de paquets echanges pendant le handshake | tshark + sudo |
+| `Handshake_octets` | Volume total en octets du handshake | tshark + sudo |
+| **Latence applicative** | | |
+| `TCP_connect_ms` | Duree d'etablissement TCP seul, avant TLS | hping3 |
+| `TTFB_ms` | Time To First Byte TLS (time_appconnect via curl) | curl |
+| `Connexions_echec` | Nombre d'echecs de connexion sur l'ensemble du test | — |
+
+> Les colonnes marquees `-1` sont non disponibles soit parce que l'outil manque,
+> soit parce que la metrique n'est pas pertinente pour ce profil.
 
 ### Colonnes du master CSV (agrege par VM)
 
@@ -428,6 +468,17 @@ compare_{ts}.csv                    # Comparatif inter-modes (commande compare)
 | `CPU_moy_pct` | CPU moyen |
 | `RAM_moy_Mo` | RAM moyenne |
 | `Retransmissions_moy_pct` | Taux de retransmissions moyen |
+| `Ping_moy_ms` / `Ping_min_ms` / `Ping_max_ms` | Statistiques RTT ICMP |
+| `Ping_p99_moy_ms` | Moyenne des p99 de latence entre VMs |
+| `Jitter_moy_ms` | Jitter UDP moyen (voip/stream uniquement) |
+| `Packet_loss_moy_pct` | Perte paquets globale moyenne |
+| `Packet_loss_UDP_moy_pct` | Perte paquets UDP moyenne (voip/stream uniquement) |
+| `Fragmentation_moy_pct` | % de fragmentation moyen sur le handshake |
+| `Handshake_paquets_moy` | Nombre moyen de paquets par handshake |
+| `Handshake_octets_moy` | Volume moyen en octets par handshake |
+| `TCP_connect_moy_ms` | Temps d'etablissement TCP moyen |
+| `TTFB_moy_ms` | TTFB TLS moyen |
+| `Connexions_echec_total` | Somme des echecs de connexion (pas une moyenne) |
 | `Nb_evenements` | Nombre d'evenements de trafic du test |
 
 ---
@@ -466,6 +517,8 @@ SERVEUR WAN                                        VMs CLIENTES
 
 ## Metriques cles a analyser
 
+### Crypto et performances
+
 | Metrique | Ce qu'elle revele |
 | --- | --- |
 | `Handshake_moy_ms` | Overhead direct de PQC vs classique a chaque connexion |
@@ -473,6 +526,20 @@ SERVEUR WAN                                        VMs CLIENTES
 | `Debit_moy_Mbps` | Degradation du debit sous charge crypto |
 | `CPU_moy_pct` | Cout CPU (ML-DSA bien plus lourd que ML-KEM) |
 | `Retransmissions_moy_pct` | Stabilite reseau sous charge |
+
+### Transport reseau
+
+| Metrique | Ce qu'elle revele |
+| --- | --- |
+| `Handshake_paquets_moy` | Impact de la taille des cles PQC sur le nombre de paquets — ML-KEM-768/1024 envoient plus de paquets que ECDHE |
+| `Handshake_octets_moy` | Volume reseau du handshake — cle publique ML-KEM-768 ≈ 1.1 KB vs 32 B pour X25519 |
+| `Fragmentation_moy_pct` | % de fragmentation MTU — les grandes cles PQC peuvent depasser 1500 B et fragmenter |
+| `TCP_connect_moy_ms` | Latence reseau brute (independante de la crypto) — baseline du chemin reseau |
+| `TTFB_moy_ms` | Latence percue par l'application — TCP + TLS, reflete l'impact reel utilisateur |
+| `Ping_moy_ms` / `Ping_p99_moy_ms` | Stabilite de la latence sous charge de trafic |
+| `Jitter_moy_ms` | Impact sur la voip/visio — un jitter > 30ms degrade la qualite audio |
+| `Packet_loss_UDP_moy_pct` | Perte sur les flux temps-reel — critique pour voip et stream |
+| `Connexions_echec_total` | Fiabilite globale — echecs TLS sur l'ensemble du test |
 
 ---
 
@@ -516,6 +583,10 @@ SERVEUR WAN                                        VMs CLIENTES
 | `ERREUR: mode X != mode du serveur Y` | Le serveur tourne avec un mode different — relancer le serveur avec le bon mode ou omettre `--mode` dans `set` |
 | `[ERR] Mode inconnu : 'xxx'` au demarrage du serveur | Le mode n'existe pas — lancer `sudo ./pqc_bench.sh --server --help` pour voir la liste |
 | `compare` ne trouve aucun master CSV | Lancer `results` au moins une fois pour generer un `master_*.csv` |
+| Colonnes `Fragmentation_pct`, `Handshake_paquets`, `Handshake_octets` toutes a `-1` | `tshark` absent ou script lance sans `sudo` — ces metriques necessitent CAP_NET_RAW |
+| Colonne `TCP_connect_ms` a `-1` | `hping3` absent — `sudo apt install hping3` |
+| Colonne `TTFB_ms` a `-1` | `curl` absent — `sudo apt install curl` |
+| `[WARN] tshark present mais non-root` | Relancer le test avec `sudo` pour activer la capture reseau |
 
 ### Permissions apres git clone / git pull
 

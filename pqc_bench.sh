@@ -148,7 +148,7 @@ cmd_install() {
 
     apt-get update -qq
     apt-get install -y \
-        nmap iperf3 hping3 tcpdump tshark \
+        nmap iperf3 hping3 fping tcpdump tshark \
         openssl python3 python3-pip \
         curl wget git cmake gcc g++ \
         libtool libssl-dev pkg-config \
