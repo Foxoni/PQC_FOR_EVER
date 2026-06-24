@@ -83,6 +83,25 @@ declare -A WAN_JITTER=( [fr]="3ms"    [eu]="8ms"    [us]="15ms"  )
 declare -A WAN_LOSS=(   [fr]="0.05%"  [eu]="0.1%"   [us]="0.2%"  )
 
 # =============================================================================
+# MÉTRIQUES RÉSEAU — initialisées à -1 (convention "non mesuré")
+# =============================================================================
+NET_PING_MOY=-1; NET_PING_MIN=-1; NET_PING_MAX=-1; NET_PING_P99=-1
+NET_JITTER=-1
+NET_LOSS_PCT=-1; NET_LOSS_UDP_PCT=-1
+HS_PKTS=-1; HS_BYTES=-1; HS_FRAG_PCT=-1
+TCP_CONNECT_MS=-1; TTFB_MS=-1
+CONN_ERRORS=0
+
+# Capacités détectées au démarrage (set par check_network_caps)
+CAN_HPING3=false; CAN_FPING=false; CAN_TSHARK=false
+CAN_CURL=false; CAN_CAPTURE=false
+
+# PIDs et fichiers temporaires des mesures en arrière-plan
+_PING_PID=0; _PING_FILE=""
+_JITTER_PID=0; _JITTER_FILE=""
+_TSHARK_PID=0; _TSHARK_PCAP=""
+
+# =============================================================================
 # COULEURS (désactivées si pas de TTY)
 # =============================================================================
 if [[ -t 1 ]]; then
@@ -214,7 +233,190 @@ check_deps() {
         || log_warn "oqs-provider absent → modes PQC indisponibles (sudo $0 --install)"
     [[ -f "$SCRIPT_PY" ]] \
         || log_warn "traffic_gen.py introuvable dans $SCRIPT_DIR"
+
+    # Outils optionnels — absence = métriques réseau partielles (-1 dans le CSV)
+    has_cmd hping3  || log_warn "hping3 absent  → TCP_connect_ms et Ping_p99_ms indisponibles"
+    has_cmd tshark  || log_warn "tshark absent  → métriques handshake réseau indisponibles (Fragmentation_pct, Handshake_paquets, Handshake_octets)"
+    has_cmd fping   || true   # fallback silencieux vers hping3 / ping
+    has_cmd curl    || log_warn "curl absent    → TTFB_ms indisponible"
+
+    check_network_caps
     $all_ok
+}
+
+check_network_caps() {
+    has_cmd hping3 && CAN_HPING3=true  || CAN_HPING3=false
+    has_cmd fping  && CAN_FPING=true   || CAN_FPING=false
+    has_cmd tshark && CAN_TSHARK=true  || CAN_TSHARK=false
+    has_cmd curl   && CAN_CURL=true    || CAN_CURL=false
+    # Capture réseau = tshark disponible ET droits root (CAP_NET_RAW)
+    if $CAN_TSHARK && [[ $EUID -eq 0 ]]; then
+        CAN_CAPTURE=true
+    else
+        CAN_CAPTURE=false
+        $CAN_TSHARK && log_warn "tshark présent mais non-root → capture réseau désactivée (sudo requis)"
+    fi
+}
+
+# =============================================================================
+# MESURES RÉSEAU EN ARRIÈRE-PLAN
+# =============================================================================
+
+# Lance ping en continu pendant un événement de trafic.
+# Appeler net_ping_start avant l'événement, net_ping_stop après.
+net_ping_start() {
+    local target="$1" duration="${2:-60}"
+    _PING_FILE="/tmp/pqc_ping_$$.txt"
+    local count=$(( duration * 2 + 30 ))   # 2 pings/s + marge
+    ping -c "$count" -i 0.5 "$target" > "$_PING_FILE" 2>/dev/null &
+    _PING_PID=$!
+}
+
+net_ping_stop() {
+    [[ "$_PING_PID" -gt 0 ]] && { kill "$_PING_PID" 2>/dev/null; wait "$_PING_PID" 2>/dev/null || true; }
+    _PING_PID=0
+    if [[ ! -f "$_PING_FILE" ]]; then
+        NET_PING_MOY=-1; NET_PING_MIN=-1; NET_PING_MAX=-1; NET_PING_P99=-1; NET_LOSS_PCT=-1
+        return
+    fi
+    # min/avg/max depuis la ligne "rtt min/avg/max/mdev"
+    local stats
+    stats=$(grep -E "^rtt|^round-trip" "$_PING_FILE" | grep -oE "[0-9]+\.[0-9]+/[0-9]+\.[0-9]+/[0-9]+\.[0-9]+" || true)
+    if [[ -n "$stats" ]]; then
+        NET_PING_MIN=$(echo "$stats" | cut -d'/' -f1)
+        NET_PING_MOY=$(echo "$stats" | cut -d'/' -f2)
+        NET_PING_MAX=$(echo "$stats" | cut -d'/' -f3)
+        # P99 calculé sur les RTT individuels
+        NET_PING_P99=$(grep -oE "time=[0-9.]+" "$_PING_FILE" | cut -d= -f2 \
+            | python3 -c "
+import sys, statistics
+vals = sorted(float(l) for l in sys.stdin if l.strip())
+if not vals: print(-1)
+else:
+    idx = max(0, int(len(vals) * 0.99) - 1)
+    print(round(vals[idx], 2))" 2>/dev/null || echo -1)
+    else
+        NET_PING_MOY=-1; NET_PING_MIN=-1; NET_PING_MAX=-1; NET_PING_P99=-1
+    fi
+    local loss
+    loss=$(grep -oE "[0-9.]+% packet loss" "$_PING_FILE" | grep -oE "[0-9.]+" || true)
+    NET_LOSS_PCT="${loss:--1}"
+    rm -f "$_PING_FILE"; _PING_FILE=""
+}
+
+# Lance un flux iperf3 UDP en arrière-plan pour mesurer jitter + perte UDP.
+# Pertinent uniquement sur voip/stream — utilisé au niveau du run global.
+net_jitter_start() {
+    local target="$1" duration="${2:-60}"
+    _JITTER_FILE="/tmp/pqc_jitter_$$.json"
+    iperf3 -c "$target" -p "$PORT_IPERF_VOIP" -u -b 1M -t "$duration" \
+        --json -i 0 > "$_JITTER_FILE" 2>/dev/null &
+    _JITTER_PID=$!
+}
+
+net_jitter_stop() {
+    [[ "$_JITTER_PID" -gt 0 ]] && wait "$_JITTER_PID" 2>/dev/null || true
+    _JITTER_PID=0
+    if [[ ! -f "$_JITTER_FILE" ]]; then
+        NET_JITTER=-1; NET_LOSS_UDP_PCT=-1; return
+    fi
+    read -r NET_JITTER NET_LOSS_UDP_PCT < <(python3 - "$_JITTER_FILE" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    s = d.get("end", {}).get("sum", {})
+    print(round(s.get("jitter_ms", -1), 3), round(s.get("lost_percent", -1), 3))
+except Exception:
+    print(-1, -1)
+PYEOF
+)
+    rm -f "$_JITTER_FILE"; _JITTER_FILE=""
+}
+
+# Mesure le temps d'établissement TCP seul (avant TLS).
+measure_tcp_connect() {
+    local target="$1" port="${2:-$PORT_TLS}"
+    if $CAN_HPING3; then
+        local raw
+        raw=$(hping3 -S -c 3 -p "$port" "$target" 2>/dev/null \
+            | grep -oE "rtt=[0-9.]+" | grep -oE "[0-9.]+" || true)
+        if [[ -n "$raw" ]]; then
+            TCP_CONNECT_MS=$(echo "$raw" \
+                | python3 -c "import sys,statistics; v=[float(l) for l in sys.stdin if l.strip()]; print(round(statistics.mean(v),2) if v else -1)" \
+                2>/dev/null || echo -1)
+            return
+        fi
+    fi
+    # Fallback : /dev/tcp bash builtin
+    local t0 t1
+    t0=$(now_ms)
+    if bash -c "exec 3>/dev/tcp/${target}/${port}" 2>/dev/null; then
+        t1=$(now_ms); TCP_CONNECT_MS=$(( t1 - t0 ))
+    else
+        TCP_CONNECT_MS=-1
+    fi
+}
+
+# Mesure le TTFB via le temps d'appconnect TLS (curl -w %{time_appconnect}).
+measure_ttfb() {
+    local target="$1" port="${2:-$PORT_TLS}"
+    if ! $CAN_CURL; then TTFB_MS=-1; return; fi
+    local raw
+    raw=$(curl -sk --connect-timeout 3 \
+        -o /dev/null \
+        -w "%{time_appconnect}" \
+        --cacert "$CERT_DIR/server.crt" \
+        "https://${target}:${port}/" \
+        2>/dev/null || echo -1)
+    TTFB_MS=$(python3 -c "
+v=float('${raw}'.strip() or -1)
+print(round(v*1000,2) if v>0 else -1)" 2>/dev/null || echo -1)
+}
+
+# Démarre une capture tshark sur un handshake (le premier uniquement).
+capture_hs_start() {
+    local target="$1" port="${2:-$PORT_TLS}"
+    if ! $CAN_CAPTURE; then return; fi
+    _TSHARK_PCAP="/tmp/pqc_hs_cap_$$.pcap"
+    local iface; iface=$(net_iface)
+    tshark -i "$iface" -f "host ${target} and port ${port}" \
+        -w "$_TSHARK_PCAP" > /dev/null 2>&1 &
+    _TSHARK_PID=$!
+    sleep 0.1   # laisser tshark s'initialiser
+}
+
+capture_hs_stop() {
+    [[ "$_TSHARK_PID" -le 0 ]] && return
+    sleep 0.1   # laisser arriver les derniers paquets
+    kill "$_TSHARK_PID" 2>/dev/null; wait "$_TSHARK_PID" 2>/dev/null || true
+    _TSHARK_PID=0
+    if [[ ! -f "$_TSHARK_PCAP" ]]; then
+        HS_PKTS=-1; HS_BYTES=-1; HS_FRAG_PCT=-1; return
+    fi
+    read -r HS_PKTS HS_BYTES HS_FRAG_PCT < <(python3 - "$_TSHARK_PCAP" <<'PYEOF'
+import sys, subprocess
+pcap = sys.argv[1]
+try:
+    r = subprocess.run(
+        ["tshark", "-r", pcap, "-T", "fields",
+         "-e", "frame.len", "-e", "ip.flags.mf", "-e", "ip.frag_offset"],
+        capture_output=True, text=True)
+    pkts = 0; total_bytes = 0; frag = 0
+    for line in r.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if not parts: continue
+        pkts += 1
+        try: total_bytes += int(parts[0])
+        except (ValueError, IndexError): pass
+        mf = parts[1] if len(parts) > 1 else ""
+        fo = parts[2] if len(parts) > 2 else ""
+        if mf == "1" or (fo and fo != "0"): frag += 1
+    print(pkts, total_bytes, round(frag / pkts * 100, 2) if pkts else -1)
+except Exception:
+    print(-1, -1, -1)
+PYEOF
+)
+    rm -f "$_TSHARK_PCAP"; _TSHARK_PCAP=""
 }
 
 # =============================================================================
@@ -297,7 +499,7 @@ crypto_gen_certs() {
 # =============================================================================
 # MESURE DU HANDSHAKE TLS
 # =============================================================================
-HS_MIN=0; HS_AVG=0; HS_MAX=0; HS_P99=0; HS_ERRORS=0
+HS_MIN=0; HS_AVG=0; HS_MAX=0; HS_P99=0
 
 measure_handshake() {
     local mode="$1" target="$2" count="${3:-$HANDSHAKE_COUNT}"
@@ -311,8 +513,17 @@ measure_handshake() {
 
     log_info "Mesure handshake TLS ($count itérations, cible: ${target}:${PORT_TLS})..."
 
-    local errors=0 t0 t1 ms
+    # Métriques réseau one-shot (avant le bulk, sur une connexion propre)
+    measure_tcp_connect "$target" "$PORT_TLS"
+    measure_ttfb        "$target" "$PORT_TLS"
+
+    local errors=0 t0 t1 ms capture_done=false
     for _ in $(seq 1 "$count"); do
+        # Capturer le premier handshake uniquement (représentatif, évite le bruit)
+        if ! $capture_done; then
+            capture_hs_start "$target" "$PORT_TLS"
+        fi
+
         t0=$(now_ms)
         # shellcheck disable=SC2086
         if openssl s_client \
@@ -330,8 +541,13 @@ measure_handshake() {
         else
             (( errors++ )) || true
         fi
+
+        if ! $capture_done; then
+            capture_hs_stop
+            capture_done=true
+        fi
     done
-    HS_ERRORS=$errors
+    CONN_ERRORS=$errors
 
     # Calcul des percentiles via Python
     read -r HS_MIN HS_AVG HS_MAX HS_P99 < <(
@@ -339,7 +555,8 @@ measure_handshake() {
     )
     rm -f "$timing_file"
 
-    log_ok "Handshake ─ min:${HS_MIN}ms moy:${HS_AVG}ms max:${HS_MAX}ms p99:${HS_P99}ms | erreurs:${HS_ERRORS}/${count}"
+    log_ok "Handshake ─ min:${HS_MIN}ms moy:${HS_AVG}ms max:${HS_MAX}ms p99:${HS_P99}ms | erreurs:${errors}/${count}"
+    log_ok "Réseau    ─ TCP_connect:${TCP_CONNECT_MS}ms TTFB:${TTFB_MS}ms | pkts:${HS_PKTS} bytes:${HS_BYTES} frag:${HS_FRAG_PCT}%"
 }
 
 # =============================================================================
@@ -467,28 +684,40 @@ collect_metrics() {
     log_info "Écriture → $out_file"
 
     {
-        # En-tête CSV
         echo "Horodatage,VM_IP,Serveur_IP,Mode,Profil,Suite_chiffrement,AES_bits,\
 Latence_min_ms,Latence_moy_ms,Latence_max_ms,Latence_p99_ms,\
 Debit_Mbps,Handshake_moy_ms,Handshake_p99_ms,\
-CPU_moy_pct,RAM_moy_Mo,Retransmissions_pct,Taille_cle_octets,Taille_cert_octets"
+CPU_moy_pct,RAM_moy_Mo,Retransmissions_pct,Taille_cle_octets,Taille_cert_octets,\
+Ping_moy_ms,Ping_min_ms,Ping_max_ms,Ping_p99_ms,\
+Jitter_ms,Packet_loss_pct,Packet_loss_UDP_pct,\
+Fragmentation_pct,Handshake_paquets,Handshake_octets,\
+TCP_connect_ms,TTFB_ms,Connexions_echec"
 
         for entry in "${TRAFFIC_RESULTS[@]}"; do
-            local profile result_file throughput retransmit
+            local profile result_file throughput retransmit jitter_val loss_udp_val
             profile="${entry%%:*}"
             result_file="${entry#*:}"
 
             [[ -f "$result_file" ]] || continue
 
-            # Extraction débit et retransmissions depuis JSON iperf3
             read -r throughput retransmit < <(
                 python3 "$SCRIPT_PY" parse_iperf "$result_file"
             )
 
+            # Jitter et perte UDP uniquement sur voip et stream
+            case "$profile" in
+                voip|stream) jitter_val="$NET_JITTER"; loss_udp_val="$NET_LOSS_UDP_PCT" ;;
+                *)           jitter_val=-1;            loss_udp_val=-1 ;;
+            esac
+
             echo "${ts},${vm_ip},${target},${mode},${profile},${cipher},${aes_bits},\
 ${HS_MIN},${HS_AVG},${HS_MAX},${HS_P99},\
 ${throughput},${HS_AVG},${HS_P99},\
-${CPU_AVG},${RAM_AVG},${retransmit},${KEY_SIZE},${CERT_SIZE}"
+${CPU_AVG},${RAM_AVG},${retransmit},${KEY_SIZE},${CERT_SIZE},\
+${NET_PING_MOY},${NET_PING_MIN},${NET_PING_MAX},${NET_PING_P99},\
+${jitter_val},${NET_LOSS_PCT},${loss_udp_val},\
+${HS_FRAG_PCT},${HS_PKTS},${HS_BYTES},\
+${TCP_CONNECT_MS},${TTFB_MS},${CONN_ERRORS}"
 
             rm -f "$result_file"
         done
@@ -516,6 +745,10 @@ collect_preset_metrics() {
     python3 - "$preset_json" "$ts" "$vm_ip" "$target" \
               "$mode" "$cipher" "$aes_bits" \
               "$CPU_AVG" "$RAM_AVG" "$KEY_SIZE" "$CERT_SIZE" \
+              "$NET_PING_MOY" "$NET_PING_MIN" "$NET_PING_MAX" "$NET_PING_P99" \
+              "$NET_JITTER" "$NET_LOSS_PCT" "$NET_LOSS_UDP_PCT" \
+              "$HS_FRAG_PCT" "$HS_PKTS" "$HS_BYTES" \
+              "$TCP_CONNECT_MS" "$TTFB_MS" "$CONN_ERRORS" \
               "$out_file" <<'EOF'
 import json, sys, csv
 
@@ -524,7 +757,13 @@ ts, vm_ip, target = sys.argv[2], sys.argv[3], sys.argv[4]
 mode, cipher, aes_bits = sys.argv[5], sys.argv[6], sys.argv[7]
 cpu, ram = sys.argv[8], sys.argv[9]
 key_sz, cert_sz = sys.argv[10], sys.argv[11]
-outfile = sys.argv[12]
+ping_moy, ping_min, ping_max, ping_p99 = sys.argv[12], sys.argv[13], sys.argv[14], sys.argv[15]
+net_jitter, loss_pct, loss_udp_pct = sys.argv[16], sys.argv[17], sys.argv[18]
+frag_pct, hs_pkts, hs_bytes = sys.argv[19], sys.argv[20], sys.argv[21]
+tcp_connect, ttfb, conn_err = sys.argv[22], sys.argv[23], sys.argv[24]
+outfile = sys.argv[25]
+
+UDP_PROFILES = {"voip", "stream"}
 
 fields = [
     "Horodatage","VM_IP","Serveur_IP","Mode","Type_test","Profil","Libelle",
@@ -532,17 +771,23 @@ fields = [
     "Delai_planifie_s","Duree_reelle_s",
     "Handshake_ms","Debit_Mbps",
     "CPU_moy_pct","RAM_moy_Mo","Retransmissions_pct",
-    "Taille_cle_octets","Taille_cert_octets"
+    "Taille_cle_octets","Taille_cert_octets",
+    "Ping_moy_ms","Ping_min_ms","Ping_max_ms","Ping_p99_ms",
+    "Jitter_ms","Packet_loss_pct","Packet_loss_UDP_pct",
+    "Fragmentation_pct","Handshake_paquets","Handshake_octets",
+    "TCP_connect_ms","TTFB_ms","Connexions_echec",
 ]
 
 with open(outfile, "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=fields)
     w.writeheader()
     for e in data.get("events", []):
+        profil = e.get("type", "?")
+        is_udp = profil in UDP_PROFILES
         w.writerow({
             "Horodatage": ts, "VM_IP": vm_ip, "Serveur_IP": target,
-            "Mode": mode, "Type_test": data.get("schedule","?"),
-            "Profil": e.get("type","?"), "Libelle": e.get("label",""),
+            "Mode": mode, "Type_test": data.get("schedule", "?"),
+            "Profil": profil, "Libelle": e.get("label", ""),
             "Suite_chiffrement": cipher, "AES_bits": aes_bits,
             "Delai_planifie_s": e.get("planned_delay_s", 0),
             "Duree_reelle_s": e.get("actual_duration_s", 0),
@@ -551,6 +796,17 @@ with open(outfile, "w", newline="") as f:
             "CPU_moy_pct": cpu, "RAM_moy_Mo": ram,
             "Retransmissions_pct": e.get("retransmit_pct", 0),
             "Taille_cle_octets": key_sz, "Taille_cert_octets": cert_sz,
+            "Ping_moy_ms": ping_moy, "Ping_min_ms": ping_min,
+            "Ping_max_ms": ping_max, "Ping_p99_ms": ping_p99,
+            "Jitter_ms":           net_jitter if is_udp else -1,
+            "Packet_loss_pct":     loss_pct,
+            "Packet_loss_UDP_pct": loss_udp_pct if is_udp else -1,
+            "Fragmentation_pct":   frag_pct,
+            "Handshake_paquets":   hs_pkts,
+            "Handshake_octets":    hs_bytes,
+            "TCP_connect_ms":      tcp_connect,
+            "TTFB_ms":             ttfb,
+            "Connexions_echec":    conn_err,
         })
 EOF
 
@@ -699,11 +955,13 @@ cmd_test() {
 
         local preset_json="/tmp/pqc_preset_${PRESET}_$$.json"
 
-        # Mesure handshake bulk (baseline statistique indépendante du trafic)
+        # Mesure handshake bulk (baseline statistique + métriques réseau one-shot)
         measure_handshake "$MODE" "$TARGET" "$HANDSHAKE_COUNT"
 
-        # Monitoring CPU/RAM pendant le preset
+        # Monitoring CPU/RAM + mesures réseau en parallèle pendant le preset
         start_monitor
+        net_ping_start   "$TARGET" 70
+        net_jitter_start "$TARGET" 70
 
         log_info "Exécution preset $PRESET (60s, événements staggerés)..."
         python3 "$SCRIPT_DIR/traffic_presets.py" run \
@@ -715,6 +973,8 @@ cmd_test() {
             --duration 60 \
             --output "$preset_json"
 
+        net_jitter_stop
+        net_ping_stop
         stop_monitor
 
         # Lecture du label du preset pour nommer le fichier CSV
@@ -733,6 +993,8 @@ cmd_test() {
 
         measure_handshake "$MODE" "$TARGET" "$HANDSHAKE_COUNT"
         start_monitor
+        net_ping_start   "$TARGET" $(( DURATION + 15 ))
+        net_jitter_start "$TARGET" $(( DURATION + 15 ))
 
         log_info "Démarrage des profils de trafic (en parallèle) :"
         local -a profile_list
@@ -757,6 +1019,8 @@ cmd_test() {
         done
 
         wait_traffic
+        net_jitter_stop
+        net_ping_stop
         stop_monitor
         collect_metrics "$MODE" "$PROFILES" "$TARGET"
     fi
@@ -781,13 +1045,16 @@ cmd_random() {
         && log_info "Durée: ${DURATION}s" \
         || log_info "Durée: infinie — Ctrl+C pour arrêter"
 
-    trap 'rm -rf "$CERT_DIR"; stop_monitor' EXIT INT TERM
+    trap 'rm -rf "$CERT_DIR"; stop_monitor; net_ping_stop; net_jitter_stop' EXIT INT TERM
     crypto_gen_certs "$MODE"
 
     # Mesure handshake bulk en amont (baseline statistique propre)
     measure_handshake "$MODE" "$TARGET" "$HANDSHAKE_COUNT"
 
     start_monitor
+    local random_dur=$(( DURATION > 0 ? DURATION + 15 : 3600 ))
+    net_ping_start   "$TARGET" "$random_dur"
+    net_jitter_start "$TARGET" "$random_dur"
 
     local out_json=""
     [[ "$DURATION" -gt 0 ]] && out_json="/tmp/pqc_random_$$.json"
@@ -801,6 +1068,8 @@ cmd_random() {
         --duration "$DURATION" \
         ${out_json:+--output "$out_json"} || true
 
+    net_jitter_stop
+    net_ping_stop
     stop_monitor
 
     if [[ -n "$out_json" && -f "$out_json" ]]; then

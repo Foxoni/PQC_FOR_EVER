@@ -339,6 +339,13 @@ class ServerCLI:
         "Handshake_moy_ms", "Handshake_min_ms", "Handshake_max_ms",
         "Debit_moy_Mbps", "Debit_min_Mbps", "Debit_max_Mbps",
         "CPU_moy_pct", "RAM_moy_Mo", "Retransmissions_moy_pct",
+        "Ping_moy_ms", "Ping_min_ms", "Ping_max_ms", "Ping_p99_moy_ms",
+        "Jitter_moy_ms",
+        "Packet_loss_moy_pct", "Packet_loss_UDP_moy_pct",
+        "Fragmentation_moy_pct",
+        "Handshake_paquets_moy", "Handshake_octets_moy",
+        "TCP_connect_moy_ms", "TTFB_moy_ms",
+        "Connexions_echec_total",
         "Nb_evenements",
     ]
 
@@ -371,12 +378,25 @@ class ServerCLI:
         cpu  = _col("CPU_moy_pct",  "cpu_avg_pct")
         ram  = _col("RAM_moy_Mo",   "ram_avg_mb")
         rtr  = _col("Retransmissions_pct", "retransmit_pct")
+        ping_moy  = _col("Ping_moy_ms")
+        ping_min  = _col("Ping_min_ms")
+        ping_max  = _col("Ping_max_ms")
+        ping_p99  = _col("Ping_p99_ms")
+        jitter    = _col("Jitter_ms")
+        loss      = _col("Packet_loss_pct")
+        loss_udp  = _col("Packet_loss_UDP_pct")
+        frag      = _col("Fragmentation_pct")
+        hs_pkts   = _col("Handshake_paquets")
+        hs_bytes  = _col("Handshake_octets")
+        tcp_conn  = _col("TCP_connect_ms")
+        ttfb      = _col("TTFB_ms")
+        conn_err  = _col("Connexions_echec")
 
         def avg(v): return round(statistics.mean(v), 3) if v else ""
         def mn(v):  return round(min(v), 3)             if v else ""
         def mx(v):  return round(max(v), 3)             if v else ""
+        def sumv(v): return int(sum(v))                 if v else ""
 
-        # Mode et Type_test : premier enregistrement
         first = rows[0] if rows else {}
         mode  = first.get("Mode") or first.get("mode", "?")
         ttype = first.get("Type_test") or first.get("schedule", "?")
@@ -388,6 +408,19 @@ class ServerCLI:
             "CPU_moy_pct":   avg(cpu),
             "RAM_moy_Mo":    avg(ram),
             "Retransmissions_moy_pct": avg(rtr),
+            "Ping_moy_ms":             avg(ping_moy),
+            "Ping_min_ms":             mn(ping_min),
+            "Ping_max_ms":             mx(ping_max),
+            "Ping_p99_moy_ms":         avg(ping_p99),
+            "Jitter_moy_ms":           avg(jitter),
+            "Packet_loss_moy_pct":     avg(loss),
+            "Packet_loss_UDP_moy_pct": avg(loss_udp),
+            "Fragmentation_moy_pct":   avg(frag),
+            "Handshake_paquets_moy":   avg(hs_pkts),
+            "Handshake_octets_moy":    avg(hs_bytes),
+            "TCP_connect_moy_ms":      avg(tcp_conn),
+            "TTFB_moy_ms":             avg(ttfb),
+            "Connexions_echec_total":  sumv(conn_err),
             "Nb_evenements": len(rows),
         }
 
@@ -397,6 +430,12 @@ class ServerCLI:
             "Handshake_moy_ms", "Handshake_min_ms", "Handshake_max_ms",
             "Debit_moy_Mbps", "Debit_min_Mbps", "Debit_max_Mbps",
             "CPU_moy_pct", "RAM_moy_Mo", "Retransmissions_moy_pct",
+            "Ping_moy_ms", "Ping_min_ms", "Ping_max_ms", "Ping_p99_moy_ms",
+            "Jitter_moy_ms",
+            "Packet_loss_moy_pct", "Packet_loss_UDP_moy_pct",
+            "Fragmentation_moy_pct",
+            "Handshake_paquets_moy", "Handshake_octets_moy",
+            "TCP_connect_moy_ms", "TTFB_moy_ms",
         ]
         def _vals(key):
             out = []
@@ -406,6 +445,13 @@ class ServerCLI:
                 except (TypeError, ValueError, KeyError):
                     pass
             return out
+
+        def _conn_err_total():
+            total = 0
+            for s in vm_summaries:
+                try: total += int(s.get("Connexions_echec_total", 0) or 0)
+                except (TypeError, ValueError): pass
+            return total
 
         rows = []
         for label, fn in [
@@ -417,6 +463,7 @@ class ServerCLI:
             for k in num_keys:
                 v = _vals(k)
                 r[k] = round(fn(v), 3) if v else ""
+            r["Connexions_echec_total"] = _conn_err_total()
             rows.append(r)
 
         if n_vms > 1:
@@ -424,6 +471,7 @@ class ServerCLI:
             for k in num_keys:
                 v = _vals(k)
                 r[k] = round(statistics.stdev(v), 3) if len(v) > 1 else ""
+            r["Connexions_echec_total"] = ""
             rows.append(r)
         return rows
 
