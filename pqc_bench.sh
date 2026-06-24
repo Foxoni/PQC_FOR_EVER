@@ -124,7 +124,7 @@ die()         { log_error "$*"; exit 1; }
 has_cmd()       { command -v "$1" &>/dev/null; }
 require_root()  { [[ $EUID -eq 0 ]] || die "Nécessite sudo : sudo $0 $*"; }
 timestamp()     { date +"%Y%m%dT%H%M%S"; }
-now_ms()        { date +%s%3N; }  # epoch en millisecondes (GNU date, Linux)
+now_ms()        { local t; t=$(date +%s%N); echo $(( t / 1000000 )); }  # ms : divise ns par 1e6 (compatible toutes versions de date)
 
 local_ip() {
     local ip
@@ -360,7 +360,7 @@ net_jitter_stop() {
     if [[ ! -f "$_JITTER_FILE" ]]; then
         NET_JITTER=-1; NET_LOSS_UDP_PCT=-1; return
     fi
-    read -r NET_JITTER NET_LOSS_UDP_PCT < <(python3 - "$_JITTER_FILE" <<'PYEOF'
+    IFS=' ' read -r NET_JITTER NET_LOSS_UDP_PCT < <(python3 - "$_JITTER_FILE" <<'PYEOF'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -433,7 +433,7 @@ capture_hs_stop() {
     if [[ ! -f "$_TSHARK_PCAP" ]]; then
         HS_PKTS=-1; HS_BYTES=-1; HS_FRAG_PCT=-1; return
     fi
-    read -r HS_PKTS HS_BYTES HS_FRAG_PCT < <(python3 - "$_TSHARK_PCAP" <<'PYEOF'
+    IFS=' ' read -r HS_PKTS HS_BYTES HS_FRAG_PCT < <(python3 - "$_TSHARK_PCAP" <<'PYEOF'
 import sys, subprocess
 pcap = sys.argv[1]
 try:
@@ -620,7 +620,7 @@ measure_handshake() {
     # Calcul des percentiles via Python
     local stats_out
     if stats_out=$(python3 "$SCRIPT_PY" stats "$timing_file" 2>/dev/null); then
-        read -r HS_MIN HS_AVG HS_MAX HS_P99 <<< "$stats_out"
+        IFS=' ' read -r HS_MIN HS_AVG HS_MAX HS_P99 <<< "$stats_out"
     else
         log_warn "Calcul des statistiques handshake échoué — valeurs mises à 0"
         HS_MIN=0; HS_AVG=0; HS_MAX=0; HS_P99=0
@@ -652,7 +652,7 @@ stop_monitor() {
     if [[ -f "$MONITOR_FILE" ]]; then
         local result
         if result=$(python3 "$SCRIPT_PY" avgres "$MONITOR_FILE" 2>/dev/null); then
-            read -r CPU_AVG RAM_AVG <<< "$result"
+            IFS=' ' read -r CPU_AVG RAM_AVG <<< "$result"
         else
             log_warn "Lecture monitoring CPU/RAM échouée — valeurs mises à 0"
             CPU_AVG=0; RAM_AVG=0
@@ -776,7 +776,7 @@ TCP_connect_ms,TTFB_ms,Connexions_echec"
 
             [[ -f "$result_file" ]] || continue
 
-            read -r throughput retransmit < <(
+            IFS=' ' read -r throughput retransmit < <(
                 python3 "$SCRIPT_PY" parse_iperf "$result_file"
             )
 

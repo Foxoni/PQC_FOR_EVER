@@ -37,14 +37,17 @@ IPERF_PORT: dict[str, int] = {
 # Chaque handshake TLS par événement utilise ces paramètres.
 # =============================================================================
 OPENSSL_CFG: dict[str, dict] = {
-    "classic":   {"cipher": "TLS_AES_128_GCM_SHA256", "groups": "",               "pqc": False},
-    "mlkem512":  {"cipher": "TLS_AES_128_GCM_SHA256", "groups": "mlkem512",       "pqc": True},
-    "mlkem768":  {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "mlkem768",       "pqc": True},
-    "mlkem1024": {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "mlkem1024",      "pqc": True},
-    "hybrid":    {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "X25519MLKEM768", "pqc": True},
-    "mldsa44":   {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "",               "pqc": True},
-    "mldsa65":   {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "",               "pqc": True},
-    "mldsa87":   {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "",               "pqc": True},
+    "classic":     {"cipher": "TLS_AES_128_GCM_SHA256", "groups": "",               "pqc": False},
+    "mlkem512":    {"cipher": "TLS_AES_128_GCM_SHA256", "groups": "mlkem512",       "pqc": True},
+    "mlkem768":    {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "mlkem768",       "pqc": True},
+    "mlkem1024":   {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "mlkem1024",      "pqc": True},
+    "hybrid-kem":  {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "X25519MLKEM768", "pqc": True},
+    "hybrid-full": {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "X25519MLKEM768", "pqc": True},
+    "mldsa44":     {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "",               "pqc": True},
+    "mldsa65":     {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "",               "pqc": True},
+    "mldsa87":     {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "",               "pqc": True},
+    "slhdsa128":   {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "X25519MLKEM768", "pqc": True},
+    "slhdsa256":   {"cipher": "TLS_AES_256_GCM_SHA384", "groups": "X25519MLKEM768", "pqc": True},
 }
 
 # =============================================================================
