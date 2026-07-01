@@ -19,7 +19,6 @@ import signal
 import socket
 import random
 import statistics
-from pathlib import Path
 
 
 # =============================================================================
@@ -122,13 +121,14 @@ def cmd_parse_iperf(result_file: str) -> None:
 
     throughput_mbps = round(throughput_bps / 1e6, 2)
 
-    # Retransmissions TCP (absent en UDP)
-    retransmit_pct = 0.0
-    sent = end.get("sum_sent", {})
-    retrans = sent.get("retransmits", 0)
-    packets = sent.get("packets", 0) or sent.get("bytes", 0)
-    if packets:
-        retransmit_pct = round(retrans / packets * 100, 3)
+    # Retransmissions TCP — sum_sent n'a pas de champ "packets" pour TCP (c'est UDP qui l'a).
+    # On estime le nombre de segments utiles depuis les octets transférés (MSS typique 1460).
+    sent        = end.get("sum_sent", {})
+    retrans     = sent.get("retransmits", 0) or 0
+    bytes_sent  = sent.get("bytes", 0) or 0
+    useful_segs = bytes_sent / 1460
+    total_segs  = useful_segs + retrans
+    retransmit_pct = round(retrans / total_segs * 100, 3) if total_segs > 0 else 0.0
 
     print(f"{throughput_mbps} {retransmit_pct}")
 

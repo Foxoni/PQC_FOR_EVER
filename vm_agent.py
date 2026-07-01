@@ -86,6 +86,7 @@ class VMAgent:
                 "mode":        req.get("mode", "mlkem768"),
                 "wan_profile": req.get("wan_profile", "eu"),
                 "duration":    req.get("duration"),
+                "vm_id":       req.get("vm_id", 0),
             }
             if not self.cfg["target"]:
                 return {"ok": False, "error": "parametre --target manquant (IP du serveur WAN)"}
@@ -121,6 +122,8 @@ class VMAgent:
                 cmd += ["--wan-profile", self.cfg["wan_profile"]]
             if self.cfg.get("duration"):
                 cmd += ["--duration", str(self.cfg["duration"])]
+            if self.cfg.get("vm_id"):
+                cmd += ["--vm-id", str(self.cfg["vm_id"])]
 
             self._run_start = time.time()
             try:

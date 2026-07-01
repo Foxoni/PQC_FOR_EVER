@@ -212,13 +212,16 @@ class ServerCLI:
             print(f"  [target auto: {srv['ip']}]")
 
 
+        idx_rev = {v: k for k, v in self._idx.items()}   # ip -> index scan
         for ip in self._resolve(target):
-            r = self._send(ip, {"cmd": "CONFIGURE", **cfg})
-            print(f"  {ip}: {'OK' if r.get('ok') else r.get('error', '?')}")
+            vm_id = idx_rev.get(ip, 0)
+            r = self._send(ip, {"cmd": "CONFIGURE", **cfg, "vm_id": vm_id})
+            print(f"  {ip}: {'OK' if r.get('ok') else r.get('error', '?')}"
+                  + (f"  [vm_id={vm_id}]" if vm_id else ""))
             if r.get("ok"):
                 vm = self.vms.setdefault(ip, VM(ip))
                 vm.state  = "configured"
-                vm.config = cfg
+                vm.config = {**cfg, "vm_id": vm_id}
 
     def cmd_arm(self, args):
         target = args[0] if args else "all"

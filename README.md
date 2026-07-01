@@ -199,12 +199,13 @@ pqc> scan 192.168.1.0/24
 3 agent(s) detecte(s).
 
 # 2. Configurer toutes les VMs (mode et IP auto-detectes depuis le serveur)
+#    Chaque VM reçoit un vm_id base sur son index de scan → port iperf3 dedie
 pqc> set all --preset 2
   [mode auto: hybrid-full]
   [target auto: 192.168.1.1]
-  192.168.1.10: OK
-  192.168.1.11: OK
-  192.168.1.12: OK
+  192.168.1.10: OK  [vm_id=1]
+  192.168.1.11: OK  [vm_id=2]
+  192.168.1.12: OK  [vm_id=3]
 
 # 3. Ou configurer chaque VM par son numero de scan
 pqc> set 1 --preset 1
@@ -563,12 +564,13 @@ SERVEUR WAN                                        VMs CLIENTES
 
 | Port | Protocole | Usage |
 | --- | --- | --- |
-| 5201 | TCP | iperf3 - transfert fichier |
-| 5202 | UDP | iperf3 - visioconference (bidir) |
-| 5203 | TCP | iperf3 - streaming video |
-| 5204 | TCP | iperf3 - navigation web |
-| 5205 | TCP | iperf3 - messagerie |
-| 5206-5210 | TCP+UDP | iperf3 - mesure jitter UDP (pool dedie, rotation par IP cliente pour eviter les collisions) |
+| 5201-5210 | TCP+UDP | iperf3 - pool serveur (10 instances independantes, une par port) |
+
+> **Attribution des ports iperf3 :** quand les VMs sont orchestrees via `server_cli.py`, chaque VM
+> reçoit un port dedie lors du `set` (VM #1 → 5201, VM #2 → 5202, etc.) ce qui elimine toute
+> contention entre VMs concurrentes. Les ports 5206-5210 servent aussi a la mesure du jitter UDP
+> (rotation par IP cliente). Sans orchestrateur (`--vm-id` non fourni), les profils utilisent leurs
+> ports historiques : file=5201, voip=5202, stream=5203, web=5204, msg=5205.
 | 8443 | TCP/TLS | Serveur TLS (handshake PQC) |
 | 9998 | TCP | vm_agent - controle par server_cli.py |
 | 9999 | TCP | Port marqueur (detection deploiement par --scan) |
@@ -584,6 +586,7 @@ SERVEUR WAN                                        VMs CLIENTES
 | `oqsprovider not found` apres `--install` | Relancer `sudo ./pqc_bench.sh --install` |
 | `openssl list -providers` ne montre pas `oqsprovider` malgre une installation reussie | Le `.so` a ete installe dans un repertoire different de celui ecrit dans `openssl.cnf` (comportement cmake sur Ubuntu 24+/26+). Verifier avec `find /usr -name "oqsprovider.so"` puis corriger avec `sudo ln -s <chemin_reel> /usr/local/lib/ossl-modules/oqsprovider.so` (creer le dossier si necessaire : `sudo mkdir -p /usr/local/lib/ossl-modules`). Ce bug est corrige dans la version actuelle de `--install` qui detecte le chemin dynamiquement. |
 | `iperf3: connect failed` | Verifier que le serveur tourne et les ports 5201-5210 sont ouverts |
+| Debit nul sur certaines VMs (`0.0 Mbps`) malgre le serveur actif | Faire `scan` puis `set` avant `launch` — sans scan, les VMs n'ont pas de `vm_id` et partagent les memes ports iperf3 (contention) |
 | `openssl s_client: handshake failure` | Le mode du client et du serveur doivent correspondre |
 | `tc: command not found` | Installer `iproute2` ; sans tc la simulation WAN est desactivee |
 | Resultats trop variables | Augmenter `--hs-count 200` et `--duration 120` |

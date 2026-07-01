@@ -23,6 +23,7 @@ SCRIPT_PY="${SCRIPT_DIR}/traffic_gen.py"
 OUTPUT_DIR="${SCRIPT_DIR}/results"
 TARGET=""
 SERVER_IP=""
+VM_ID=0
 DURATION=30
 MODE="classic"
 PROFILES="all"
@@ -986,7 +987,16 @@ _WAN_IFACE=""
 
 wan_apply() {
     local profile="${1:-eu}"
-    _WAN_IFACE=$(net_iface)
+
+    # Trouver l'interface qui porte l'IP du serveur (interface LAN vers les VMs).
+    # net_iface() utilise "ip route get 1.1.1.1" et retourne l'interface internet,
+    # ce qui est incorrect sur un serveur à deux NICs (LAN + WAN/internet).
+    local bind_ip="${SERVER_IP:-$(local_ip)}"
+    if [[ -n "$bind_ip" ]]; then
+        _WAN_IFACE=$(ip -o addr show \
+            | awk -v ip="$bind_ip" '/inet /{split($4,a,"/"); if(a[1]==ip){print $2; exit}}')
+    fi
+    [[ -z "$_WAN_IFACE" ]] && _WAN_IFACE=$(net_iface)
 
     if [[ -z "$_WAN_IFACE" ]]; then
         log_warn "Interface réseau introuvable — simulation WAN désactivée"
@@ -1175,6 +1185,7 @@ cmd_test() {
                 --port-tls "$PORT_TLS" \
                 --cert   "$CERT_DIR/server.crt" \
                 --duration 60 \
+                --vm-id  "$VM_ID" \
                 --output "$preset_json" 2>&1); then
             log_warn "traffic_presets.py run a signalé une erreur : $preset_err"
         fi
@@ -1275,6 +1286,7 @@ cmd_random() {
         --port-tls "$PORT_TLS" \
         --cert     "$CERT_DIR/server.crt" \
         --duration "$DURATION" \
+        --vm-id    "$VM_ID" \
         ${out_json:+--output "$out_json"} || true
 
     net_jitter_stop
@@ -1556,6 +1568,7 @@ while [[ $# -gt 0 ]]; do
         --output)       OUTPUT_DIR="$2";      shift ;;
         --wan-profile)  WAN_PROFILE="$2";     shift ;;
         --server-ip)    SERVER_IP="$2";       shift ;;
+        --vm-id)        VM_ID="$2";           shift ;;
         -h|--help)
             if [[ "$ACTION" == "server" ]]; then usage_server; else usage; fi
             ;;

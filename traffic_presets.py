@@ -297,12 +297,13 @@ def measure_handshake_once(target: str, port: int, mode: str, cert: str) -> int:
 # EXÉCUTEUR IPERF3 PAR TYPE
 # =============================================================================
 
-def _run_iperf(target: str, etype: str, duration: float) -> tuple[float, float]:
+def _run_iperf(target: str, etype: str, duration: float, vm_port: int = 0) -> tuple[float, float]:
     """
     Lance iperf3 selon le profil de trafic.
     Retourne (throughput_mbps, retransmit_pct).
+    vm_port > 0 : port dédié à cette VM (évite la contention inter-VMs).
     """
-    port = IPERF_PORT[etype]
+    port = vm_port if vm_port > 0 else IPERF_PORT[etype]
     dur  = str(int(duration))
 
     # Paramètres par profil
@@ -316,14 +317,26 @@ def _run_iperf(target: str, etype: str, duration: float) -> tuple[float, float]:
 
     cmd = ["iperf3", "-c", target, "-p", str(port), "-t", dur, "--json"] + extra
 
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=duration + 15,
-        )
-        data = json.loads(proc.stdout)
-    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, ValueError):
-        return 0.0, 0.0
+    # Retry si le serveur iperf3 est occupé (un seul client à la fois par port).
+    # Plusieurs VMs peuvent se disputer le même port → "Connection refused" ou "server busy".
+    data: dict = {}
+    for attempt in range(3):
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=duration + 15,
+            )
+            data = json.loads(proc.stdout)
+        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, ValueError):
+            return 0.0, 0.0
+
+        err = data.get("error", "")
+        if err and ("busy" in err.lower() or "refused" in err.lower() or "unable to connect" in err.lower()):
+            if attempt < 2:
+                time.sleep(3)
+                continue
+            return 0.0, 0.0
+        break  # succès ou erreur non-retry
 
     end = data.get("end", {})
 
@@ -337,11 +350,14 @@ def _run_iperf(target: str, etype: str, duration: float) -> tuple[float, float]:
     if "sum_bidir_reverse" in end:
         bps = max(bps, end["sum_bidir_reverse"].get("bits_per_second", 0.0))
 
-    # Retransmissions TCP
-    sent = end.get("sum_sent", {})
-    retrans  = sent.get("retransmits", 0)
-    segments = max(sent.get("packets", 0), 1)
-    retransmit_pct = round(retrans / segments * 100, 3)
+    # Retransmissions TCP — sum_sent n'a pas de champ "packets" pour TCP (c'est UDP qui l'a).
+    # On estime le nombre de segments utiles depuis les octets transférés (MSS typique 1460).
+    sent        = end.get("sum_sent", {})
+    retrans     = sent.get("retransmits", 0) or 0
+    bytes_sent  = sent.get("bytes", 0) or 0
+    useful_segs = bytes_sent / 1460
+    total_segs  = useful_segs + retrans
+    retransmit_pct = round(retrans / total_segs * 100, 3) if total_segs > 0 else 0.0
 
     return round(bps / 1e6, 2), retransmit_pct
 
@@ -357,6 +373,7 @@ def _run_event(
     cert: str,
     results: list,
     lock: threading.Lock,
+    vm_port: int = 0,
 ) -> None:
     """
     Exécute un événement du planning :
@@ -378,7 +395,7 @@ def _run_event(
     hs_ms = measure_handshake_once(target, port_tls, mode, cert)
 
     # --- 3. Trafic ---
-    throughput_mbps, retransmit_pct = _run_iperf(target, etype, dur_s)
+    throughput_mbps, retransmit_pct = _run_iperf(target, etype, dur_s, vm_port=vm_port)
     actual_duration = round(time.time() - actual_start, 1)
 
     # --- 4. Enregistrement ---
@@ -410,6 +427,7 @@ def run_schedule(
     port_tls: int,
     mode: str,
     cert: str,
+    vm_port: int = 0,
 ) -> list[dict]:
     """
     Démarre tous les événements en parallèle via des threads.
@@ -423,7 +441,7 @@ def run_schedule(
     for event in schedule:
         t = threading.Thread(
             target=_run_event,
-            args=(event, target, port_tls, mode, cert, results, lock),
+            args=(event, target, port_tls, mode, cert, results, lock, vm_port),
             daemon=True,
         )
         threads.append(t)
@@ -452,6 +470,7 @@ def run_continuous(
     cert: str,
     duration: int = 0,
     output_file: str = "",
+    vm_port: int = 0,
 ) -> list[dict]:
     """
     Lance 5 threads-scheduleurs (un par type de trafic) en boucle continue.
@@ -503,7 +522,7 @@ def run_continuous(
                 break
 
             # ── Trafic iperf3 ──
-            throughput_mbps, retransmit_pct = _run_iperf(target, etype, dur)
+            throughput_mbps, retransmit_pct = _run_iperf(target, etype, dur, vm_port=vm_port)
             actual_dur = round(time.time() - t_event_start, 1)
             offset     = round(t_event_start - t_global_start, 1)
 
@@ -620,13 +639,15 @@ def cmd_run(args: argparse.Namespace) -> None:
     print("─" * 72)
 
     # Exécution
+    vm_port  = 5200 + args.vm_id if args.vm_id > 0 else 0
     t_global = time.time()
-    results = run_schedule(
+    results  = run_schedule(
         schedule    = schedule,
         target      = args.target,
         port_tls    = args.port_tls,
         mode        = args.mode,
         cert        = args.cert,
+        vm_port     = vm_port,
     )
     elapsed = round(time.time() - t_global, 1)
 
@@ -678,6 +699,8 @@ def main() -> None:
                        help="Graine aléatoire (reproductibilité du mode --random)")
     run_p.add_argument("--output",   required=True,
                        help="Fichier JSON de sortie des résultats")
+    run_p.add_argument("--vm-id",   type=int, default=0, dest="vm_id",
+                       help="ID unique de cette VM (1-10) — détermine le port iperf3 dédié")
 
     # --- continuous ---
     cont_p = sub.add_parser(
@@ -695,6 +718,8 @@ def main() -> None:
                         help="Durée en secondes (0 = infini, Ctrl+C pour arrêter)")
     cont_p.add_argument("--output",   default="",
                         help="Fichier JSON de sortie (optionnel)")
+    cont_p.add_argument("--vm-id",   type=int, default=0, dest="vm_id",
+                        help="ID unique de cette VM (1-10) — détermine le port iperf3 dédié")
 
     args = parser.parse_args()
 
@@ -710,6 +735,7 @@ def main() -> None:
             cert        = args.cert,
             duration    = args.duration,
             output_file = args.output,
+            vm_port     = 5200 + args.vm_id if args.vm_id > 0 else 0,
         )
 
 
