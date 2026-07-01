@@ -230,7 +230,13 @@ _register_oqs_provider() {
     cnf="$(openssl version -d | awk -F'"' '{print $2}')/openssl.cnf"
     grep -q oqsprovider "$cnf" 2>/dev/null && return
 
-    cat >> "$cnf" <<'CONF'
+    # Détecter le chemin réel : cmake choisit le répertoire de modules de
+    # l'OpenSSL système, qui varie selon la distro (Ubuntu 24+: /usr/lib/x86_64-linux-gnu/...)
+    local provider_so
+    provider_so=$(find /usr /opt -name "oqsprovider.so" 2>/dev/null | head -1)
+    [[ -n "$provider_so" ]] || die "oqsprovider.so introuvable après compilation — consultez le log de build"
+
+    cat >> "$cnf" <<CONF
 
 # --- oqs-provider (Post-Quantum) ---
 [provider_sect]
@@ -241,10 +247,10 @@ oqsprovider = oqsprovider_sect
 activate = 1
 
 [oqsprovider_sect]
-module   = /usr/local/lib/ossl-modules/oqsprovider.so
+module   = ${provider_so}
 activate = 1
 CONF
-    log_ok "oqs-provider enregistré dans $cnf"
+    log_ok "oqs-provider enregistré dans $cnf (module: $provider_so)"
 }
 
 check_deps() {

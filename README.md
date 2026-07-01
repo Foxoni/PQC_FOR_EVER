@@ -581,7 +581,8 @@ SERVEUR WAN                                        VMs CLIENTES
 | --- | --- |
 | `Permission denied` apres `git clone` ou `git pull` | `chmod +x pqc_bench.sh` (voir ci-dessous) |
 | `sudo: 'pqc_bench.sh': command not found` | Utiliser `sudo ./pqc_bench.sh` (le `./` est obligatoire) |
-| `oqsprovider not found` | Relancer `sudo ./pqc_bench.sh --install` |
+| `oqsprovider not found` apres `--install` | Relancer `sudo ./pqc_bench.sh --install` |
+| `openssl list -providers` ne montre pas `oqsprovider` malgre une installation reussie | Le `.so` a ete installe dans un repertoire different de celui ecrit dans `openssl.cnf` (comportement cmake sur Ubuntu 24+/26+). Verifier avec `find /usr -name "oqsprovider.so"` puis corriger avec `sudo ln -s <chemin_reel> /usr/local/lib/ossl-modules/oqsprovider.so` (creer le dossier si necessaire : `sudo mkdir -p /usr/local/lib/ossl-modules`). Ce bug est corrige dans la version actuelle de `--install` qui detecte le chemin dynamiquement. |
 | `iperf3: connect failed` | Verifier que le serveur tourne et les ports 5201-5210 sont ouverts |
 | `openssl s_client: handshake failure` | Le mode du client et du serveur doivent correspondre |
 | `tc: command not found` | Installer `iproute2` ; sans tc la simulation WAN est desactivee |
