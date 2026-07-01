@@ -11,6 +11,8 @@ Lancement :
 
 import sys
 import json
+import os
+import shutil
 import socket
 import subprocess
 import threading
@@ -184,6 +186,124 @@ class VMAgent:
             "state":      self.state,
         }
 
+    def _preflight(self, _req):
+        """Vérifie que l'environnement local est prêt pour un benchmark."""
+        checks = []
+
+        def _ok(name, detail=""):
+            checks.append({"name": name, "status": "ok", "detail": detail})
+
+        def _warn(name, detail=""):
+            checks.append({"name": name, "status": "warn", "detail": detail})
+
+        def _fail(name, detail=""):
+            checks.append({"name": name, "status": "fail", "detail": detail})
+
+        # — Configuration —
+        with self._lock:
+            cfg   = dict(self.cfg)
+            state = self.state
+
+        target = cfg.get("target", "")
+        mode   = cfg.get("mode", "")
+
+        if not target or not mode:
+            _fail("configuration", f"VM non configurée (état: {state}) — lancez 'set' puis 'arm'")
+            return {"ok": True, "checks": checks}
+        _ok("configuration", f"mode={mode}  target={target}")
+
+        # — Outils —
+        TOOLS = [
+            ("openssl", True,  "TLS impossible sans openssl"),
+            ("iperf3",  False, "métriques débit/jitter indisponibles"),
+            ("ping",    False, "métriques latence indisponibles"),
+            ("tshark",  False, "capture paquets indisponible"),
+            ("python3", False, "calculs de stats limités"),
+            ("ip",      False, "détection d'interface limitée"),
+        ]
+        for tool, critical, reason in TOOLS:
+            if shutil.which(tool):
+                _ok(f"outil:{tool}")
+            elif critical:
+                _fail(f"outil:{tool}", reason)
+            else:
+                _warn(f"outil:{tool}", reason)
+
+        # — OQS provider (requis pour tout mode non-classic) —
+        if mode != "classic" and shutil.which("openssl"):
+            try:
+                r = subprocess.run(
+                    ["openssl", "list", "-providers"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if "oqsprovider" in r.stdout:
+                    _ok("openssl:oqs-provider")
+                else:
+                    _fail("openssl:oqs-provider",
+                          "oqs-provider absent — 'openssl list -providers' ne le montre pas")
+            except Exception as e:
+                _warn("openssl:oqs-provider", f"vérification échouée : {e}")
+        else:
+            _ok("openssl:oqs-provider", "non requis (mode classic)")
+
+        # — Droits tshark (root ou CAP_NET_RAW) —
+        if shutil.which("tshark"):
+            if os.geteuid() == 0:
+                _ok("droits:tshark", "root")
+            else:
+                try:
+                    tshark_bin = shutil.which("tshark")
+                    r = subprocess.run(
+                        ["getcap", tshark_bin],
+                        capture_output=True, text=True, timeout=3
+                    )
+                    if "cap_net_raw" in r.stdout:
+                        _ok("droits:tshark", "CAP_NET_RAW présent")
+                    else:
+                        _warn("droits:tshark",
+                              "ni root ni CAP_NET_RAW — tshark ne pourra pas capturer")
+                except Exception:
+                    _warn("droits:tshark", "impossible de vérifier les capabilities (getcap absent ?)")
+
+        # — Connectivité réseau —
+        # Ping simple vers la cible
+        try:
+            r = subprocess.run(
+                ["ping", "-c", "1", "-W", "2", target],
+                capture_output=True, timeout=5
+            )
+            if r.returncode == 0:
+                _ok("réseau:ping", f"{target} joignable")
+            else:
+                _fail("réseau:ping", f"{target} injoignable — vérifiez l'IP et le routage")
+        except Exception as e:
+            _warn("réseau:ping", f"ping échoué : {e}")
+
+        # Port TLS (8443)
+        try:
+            with socket.create_connection((target, 8443), timeout=3):
+                _ok("réseau:tls-8443", f"{target}:8443 ouvert")
+        except OSError:
+            _fail("réseau:tls-8443",
+                  f"{target}:8443 inaccessible — serveur démarré ? (pqc_bench.sh --server)")
+
+        # Ports iperf3 (5201-5210) — TCP control channel
+        iperf3_found = None
+        for port in range(5201, 5211):
+            try:
+                with socket.create_connection((target, port), timeout=1):
+                    iperf3_found = port
+                    break
+            except OSError:
+                continue
+        if iperf3_found:
+            _ok("réseau:iperf3", f"{target}:{iperf3_found} accessible (pool 5201-5210)")
+        else:
+            _warn("réseau:iperf3",
+                  f"aucun port iperf3 (5201-5210) accessible sur {target} — métriques débit/jitter manquantes")
+
+        return {"ok": True, "checks": checks}
+
     _DISPATCH = {
         "STATUS":      _status,
         "CONFIGURE":   _configure,
@@ -192,6 +312,7 @@ class VMAgent:
         "RESET":       _reset,
         "GET_RESULTS": _get_results,
         "GET_LOGS":    _get_logs,
+        "PREFLIGHT":   _preflight,
     }
 
     # ------------------------------------------------------------------ #

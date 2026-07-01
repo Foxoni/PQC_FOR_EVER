@@ -355,17 +355,36 @@ net_jitter_start() {
         _JITTER_PID=0; return
     fi
     _JITTER_FILE="/tmp/pqc_jitter_$$.json"
-    # PORT_IPERF_JITTER=5210 — port dédié, ne partage pas avec le profil voip (5202)
-    iperf3 -c "$target" -p "$PORT_IPERF_JITTER" -u -b 1M -t "$duration" \
-        --json -i 0 > "$_JITTER_FILE" 2>&1 &
-    _JITTER_PID=$!
-    sleep 0.2
-    if ! kill -0 "$_JITTER_PID" 2>/dev/null; then
-        log_warn "iperf3 UDP jitter vers $target:$PORT_IPERF_JITTER échoué"
-        log_warn "  iperf3 utilise TCP pour le contrôle même en mode UDP — vérifiez que TCP ET UDP sont ouverts"
-        log_warn "  Sur le serveur : sudo ufw allow 5201:5210   (ou sudo ufw allow 5210)"
-        _JITTER_PID=0
-    fi
+
+    # Pool de 5 ports dédiés (5206-5210), un par VM idéalement.
+    # Point de départ basé sur l'IP → réduit les collisions initiales.
+    # Si le port est occupé (iperf3 busy), on tourne vers le suivant (max 5 tentatives).
+    local last_octet
+    last_octet=$(local_ip | awk -F. '{print $NF+0}')
+
+    local attempt jitter_port err
+    for (( attempt=0; attempt<5; attempt++ )); do
+        jitter_port=$(( 5206 + (last_octet + attempt) % 5 ))
+        rm -f "$_JITTER_FILE"
+        iperf3 -c "$target" -p "$jitter_port" -u -b 1M -t "$duration" \
+            --json -i 0 > "$_JITTER_FILE" 2>&1 &
+        _JITTER_PID=$!
+        sleep 0.3
+        if kill -0 "$_JITTER_PID" 2>/dev/null; then
+            return  # démarré avec succès
+        fi
+        # Lire l'erreur iperf3 pour décider de retenter ou non
+        err=$(grep -oP '(?<=error - ).*' "$_JITTER_FILE" 2>/dev/null | head -1 || true)
+        if [[ "$err" != *"busy"* ]] && [[ $attempt -eq 0 ]]; then
+            # Erreur non liée à la contention → inutile de retenter
+            break
+        fi
+        [[ $attempt -lt 4 ]] && sleep 2
+    done
+
+    err=$(grep -oP '(?<=error - ).*' "$_JITTER_FILE" 2>/dev/null | head -1 || true)
+    log_warn "iperf3 UDP jitter : tous les ports 5206-5210 indisponibles sur $target${err:+ — $err}"
+    _JITTER_PID=0
 }
 
 net_jitter_stop() {

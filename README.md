@@ -164,7 +164,8 @@ pqc>
 | `list` | Tableau : numero, IP, etat, preset, mode, WAN, derniere vue |
 | `set <N\|ip\|all> [--preset N] [--wan-profile WAN] [--duration D]` | Configure une ou toutes les VMs par numero, IP ou `all` — mode et cible auto-detectes |
 | `arm [N\|ip\|all]` | Met les VMs configurees en standby (pretes a demarrer) |
-| `launch` | Envoie START a toutes les VMs armed **simultanement** |
+| `preflight [N\|ip\|all]` | Verifie l'environnement de chaque VM (outils, OQS provider, droits, connectivite) |
+| `launch [--force]` | Envoie START a toutes les VMs armed **simultanement**, apres un pre-flight automatique — `--force` lance meme si des checks echouent |
 | `status [N\|ip\|all]` | Poll l'etat + 5 dernieres lignes de log + code de retour |
 | `logs [N\|ip\|all] [--lines N]` | Affiche le log complet de pqc_bench.sh sur la VM (defaut 50 lignes) |
 | `reset [N\|ip\|all]` | Remet en idle, kill le test si en cours |
@@ -216,23 +217,38 @@ pqc> set 1,3 --preset 2
 # 4. Mettre toutes les VMs en standby
 pqc> arm all
 
-# 5. Lancement simultane (toutes partent en meme temps)
+# 5. (optionnel) Verifier l'environnement avant de lancer
+pqc> preflight
+  [192.168.1.10] 8/8 ok
+  [192.168.1.11] 7/8 ok  1 WARN
+      WARN: droits:tshark — ni root ni CAP_NET_RAW
+  [192.168.1.12] 8/8 ok
+[OK] Toutes les VMs sont pretes.
+
+# 6. Lancement simultane — pre-flight execute automatiquement, aborte sur FAIL
 pqc> launch
+  [192.168.1.10] 8/8 ok
+  [192.168.1.11] 8/8 ok
+  [192.168.1.12] 8/8 ok
+
   Signal envoye en 3 ms
   192.168.1.10: demarre (pid 1234)
   192.168.1.11: demarre (pid 1235)
   192.168.1.12: demarre (pid 1236)
 
-# 6. Surveiller l'avancement (affiche aussi les derniers logs)
+# En cas de probleme bloquant detecte par le pre-flight :
+# pqc> launch --force   # force le lancement avec avertissement
+
+# 7. Surveiller l'avancement (affiche aussi les derniers logs)
 pqc> status
   192.168.1.10: running  {'mode': 'hybrid-full', 'preset': 2, ...}
     | [INFO] Handshake #42/100...
   192.168.1.11: done  rc=0
 
-# 7. En cas de probleme, consulter les logs complets
+# 8. En cas de probleme, consulter les logs complets
 pqc> logs 192.168.1.10 --lines 30
 
-# 8. Collecter les resultats du test (genere master_hybrid-full_1.csv)
+# 9. Collecter les resultats du test (genere master_hybrid-full_1.csv)
 pqc> results
   192.168.1.10: 6 evenement(s) [hybrid-full]
   192.168.1.11: 6 evenement(s) [hybrid-full]
@@ -241,7 +257,7 @@ pqc> results
 
 pqc> reset all
 
-# 9. Relancer le serveur en mode classic, refaire le cycle, puis comparer
+# 10. Relancer le serveur en mode classic, refaire le cycle, puis comparer
 pqc> compare
   Comparatif: results/compare_20260622T180000.csv  (2 ligne(s) sur 2 master(s))
 ```
@@ -450,7 +466,7 @@ compare_{ts}.csv                    # Comparatif inter-modes (commande compare)
 | `Handshake_octets` | Volume total en octets du handshake | tshark + sudo |
 | **Latence applicative** | | |
 | `TCP_connect_ms` | Duree d'etablissement TCP seul, avant TLS | hping3 |
-| `TTFB_ms` | Time To First Byte TLS (time_appconnect via curl) | curl |
+| `TTFB_ms` | Time To First Byte TLS (premier octet recu via openssl s_client) | openssl |
 | `Connexions_echec` | Nombre d'echecs de connexion sur l'ensemble du test | — |
 
 > Les colonnes marquees `-1` sont non disponibles soit parce que l'outil manque,
@@ -495,7 +511,7 @@ SERVEUR WAN                                        VMs CLIENTES
    pqc> set all --preset 2
    #    [mode auto: classic]  [target auto: 192.168.x.1]
    pqc> arm all
-   pqc> launch              ------>   [test lance simultanement sur toutes les VMs]
+   pqc> launch              ------>   [pre-flight auto, puis test lance simultanement]
    pqc> status              (attente fin du test, logs visibles en cas d'erreur)
    pqc> results             <------   [genere master_classic_1.csv]
    pqc> reset all
@@ -552,7 +568,7 @@ SERVEUR WAN                                        VMs CLIENTES
 | 5203 | TCP | iperf3 - streaming video |
 | 5204 | TCP | iperf3 - navigation web |
 | 5205 | TCP | iperf3 - messagerie |
-| 5206-5210 | TCP | iperf3 - pool reserve |
+| 5206-5210 | TCP+UDP | iperf3 - mesure jitter UDP (pool dedie, rotation par IP cliente pour eviter les collisions) |
 | 8443 | TCP/TLS | Serveur TLS (handshake PQC) |
 | 9998 | TCP | vm_agent - controle par server_cli.py |
 | 9999 | TCP | Port marqueur (detection deploiement par --scan) |
@@ -585,8 +601,12 @@ SERVEUR WAN                                        VMs CLIENTES
 | `compare` ne trouve aucun master CSV | Lancer `results` au moins une fois pour generer un `master_*.csv` |
 | Colonnes `Fragmentation_pct`, `Handshake_paquets`, `Handshake_octets` toutes a `-1` | `tshark` absent ou script lance sans `sudo` — ces metriques necessitent CAP_NET_RAW |
 | Colonne `TCP_connect_ms` a `-1` | `hping3` absent — `sudo apt install hping3` |
-| Colonne `TTFB_ms` a `-1` | `curl` absent — `sudo apt install curl` |
-| `[WARN] tshark present mais non-root` | Relancer le test avec `sudo` pour activer la capture reseau |
+| Colonne `TTFB_ms` a `-1` | openssl ne parvient pas a etablir le handshake — verifier que le serveur est demarre et que le mode correspond |
+| `[WARN] tshark present mais non-root` | Relancer `vm_agent.py` avec `sudo` ou accorder CAP_NET_RAW a tshark |
+| `launch` abandonne avec `[ABORT]` | Le pre-flight a detecte des erreurs bloquantes — lire les lignes FAIL et corriger, ou utiliser `launch --force` pour forcer quand meme |
+| `preflight` signale `oqs-provider absent` | Relancer `sudo ./pqc_bench.sh --install` ou verifier `/etc/ssl/openssl.cnf` |
+| `preflight` signale `tls-8443 inaccessible` | Le serveur n'est pas demarre — lancer `sudo ./pqc_bench.sh --server --mode MODE` |
+| `preflight` signale `iperf3 ports inaccessibles` | Le pool iperf3 n'est pas lance — le serveur demarre automatiquement les ports 5201-5210 |
 
 ### Permissions apres git clone / git pull
 

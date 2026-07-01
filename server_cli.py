@@ -11,7 +11,8 @@ Commandes disponibles :
     list                                          Tableau des VMs connues et leur etat
     set <ip|all> --mode MODE [--preset N] [...]   Configure une ou toutes les VMs
     arm [all|<ip>]                                Met les VMs configurees en standby
-    launch                                        Lance toutes les VMs armed simultanement
+    preflight [all|<ip>]                          Verifie l'environnement avant lancement
+    launch [--force]                              Lance les VMs (preflight auto, --force ignore les FAIL)
     status [all|<ip>]                             Poll l'etat des VMs
     reset [all|<ip>]                              Remet en idle (kill si en cours)
     results [--output FILE]                       Collecte et compile les CSV
@@ -227,12 +228,100 @@ class ServerCLI:
             if r.get("ok"):
                 self.vms.setdefault(ip, VM(ip)).state = "armed"
 
+    # ------------------------------------------------------------------ #
+    # Pre-flight                                                          #
+    # ------------------------------------------------------------------ #
+
+    def _run_preflight(self, ips):
+        """Envoie PREFLIGHT en parallèle, retourne {ip: response}."""
+        results = {}
+        lock = threading.Lock()
+
+        def check(ip):
+            r = self._send(ip, {"cmd": "PREFLIGHT"}, timeout=20)
+            with lock:
+                results[ip] = r
+
+        with ThreadPoolExecutor(max_workers=max(len(ips), 1)) as ex:
+            list(ex.map(check, ips))
+        return results
+
+    def _display_preflight(self, results):
+        """Affiche les résultats preflight. Retourne True si au moins un FAIL."""
+        has_fail = False
+        for ip in sorted(results, key=lambda x: ipaddress.ip_address(x)):
+            r = results[ip]
+            if not r.get("ok"):
+                print(f"  [{ip}] INJOIGNABLE — {r.get('error', '?')}")
+                has_fail = True
+                continue
+
+            checks = r.get("checks", [])
+            n_ok   = sum(1 for c in checks if c["status"] == "ok")
+            n_warn = sum(1 for c in checks if c["status"] == "warn")
+            n_fail = sum(1 for c in checks if c["status"] == "fail")
+
+            if n_fail:
+                has_fail = True
+
+            suffix = ""
+            if n_warn:
+                suffix += f"  {n_warn} WARN"
+            if n_fail:
+                suffix += f"  {n_fail} FAIL"
+            print(f"  [{ip}] {n_ok}/{len(checks)} ok{suffix}")
+
+            for c in checks:
+                if c["status"] in ("warn", "fail"):
+                    mark   = "WARN" if c["status"] == "warn" else "FAIL"
+                    detail = f" — {c['detail']}" if c.get("detail") else ""
+                    print(f"      {mark}: {c['name']}{detail}")
+
+        return has_fail
+
+    def cmd_preflight(self, args):
+        """preflight [all|<ip>]  Vérifie l'environnement de chaque VM avant lancement."""
+        # Cible : VMs armed ou configured si rien de précisé
+        if args and args[0] not in ("all",):
+            ips = self._resolve(args[0])
+        else:
+            ips = [ip for ip, vm in self.vms.items()
+                   if vm.state in ("armed", "configured")]
+
+        if not ips:
+            print("Aucune VM armed/configured. Lancez 'set' puis 'arm'."); return
+
+        print(f"Pre-flight check ({len(ips)} VM(s))...")
+        results  = self._run_preflight(ips)
+        has_fail = self._display_preflight(results)
+
+        if has_fail:
+            print("\n[FAIL] Des problèmes bloquants ont été détectés.")
+            print("       Corrigez-les ou utilisez 'launch --force' pour lancer quand même.")
+        else:
+            print("\n[OK] Toutes les VMs sont prêtes.")
+
     def cmd_launch(self, args):
+        force = "--force" in args
+
         armed = [ip for ip, vm in self.vms.items() if vm.state == "armed"]
         if not armed:
             print("Aucune VM armed. Utilisez 'arm [all]' d'abord."); return
 
-        print(f"Connexion aux {len(armed)} VM(s) pour lancement synchronise...")
+        # ---- Pre-flight (par défaut, sauf --force qui avertit seulement) ----
+        print(f"Pre-flight check ({len(armed)} VM(s))...")
+        pf_results = self._run_preflight(armed)
+        has_fail   = self._display_preflight(pf_results)
+
+        if has_fail and not force:
+            print("\n[ABORT] Des problèmes bloquants empêchent le lancement.")
+            print("        Corrigez-les ou relancez avec 'launch --force' pour ignorer.")
+            return
+
+        if has_fail:
+            print("\n[WARN] Lancement forcé malgré des erreurs — les résultats peuvent être incomplets.")
+
+        print(f"\nConnexion aux {len(armed)} VM(s) pour lancement synchronise...")
         results   = {}
         ready_n   = [0]
         rlock     = threading.Lock()
@@ -614,7 +703,8 @@ class ServerCLI:
   list                                                       Tableau des VMs et leur etat
   set <ip|all> --mode MODE --target IP [--preset N] [...]   Configure une ou toutes les VMs
   arm [all|<ip>]                                             Met les VMs configurees en standby
-  launch                                                     Lance toutes les VMs armed simultanement
+  preflight [all|<ip>]                                       Verifie l'environnement de chaque VM
+  launch [--force]                                           Lance toutes les VMs (preflight auto, --force ignore les FAIL)
   status [all|<ip>]                                          Poll l'etat + derniers logs
   logs [all|<ip>] [--lines N]                                Affiche les logs de pqc_bench.sh (defaut 50 lignes)
   reset [all|<ip>]                                           Remet en idle (kill si en cours)
@@ -625,17 +715,18 @@ class ServerCLI:
 """)
 
     _CMDS = {
-        "scan":    cmd_scan,
-        "list":    cmd_list,
-        "set":     cmd_set,
-        "arm":     cmd_arm,
-        "launch":  cmd_launch,
-        "status":  cmd_status,
-        "logs":    cmd_logs,
-        "reset":   cmd_reset,
-        "results": cmd_results,
-        "compare": cmd_compare,
-        "help":    cmd_help,
+        "scan":      cmd_scan,
+        "list":      cmd_list,
+        "set":       cmd_set,
+        "arm":       cmd_arm,
+        "preflight": cmd_preflight,
+        "launch":    cmd_launch,
+        "status":    cmd_status,
+        "logs":      cmd_logs,
+        "reset":     cmd_reset,
+        "results":   cmd_results,
+        "compare":   cmd_compare,
+        "help":      cmd_help,
     }
 
     # ------------------------------------------------------------------ #
