@@ -297,12 +297,17 @@ def measure_handshake_once(target: str, port: int, mode: str, cert: str) -> int:
 # EXÉCUTEUR IPERF3 PAR TYPE
 # =============================================================================
 
-def _run_iperf(target: str, etype: str, duration: float) -> tuple[float, float]:
+def _run_iperf(target: str, etype: str, duration: float, vm_id: int = 0) -> tuple[float, float]:
     """
     Lance iperf3 selon le profil de trafic.
     Retourne (throughput_mbps, retransmit_pct).
+    voip utilise un port par VM (5200+vm_id) pour éviter la contention inter-VMs
+    sur les sessions longues (réunion synchronisée presets 3+4).
     """
-    port = IPERF_PORT[etype]
+    if etype == "voip" and vm_id > 0:
+        port = 5200 + vm_id
+    else:
+        port = IPERF_PORT[etype]
     dur  = str(int(duration))
 
     # Paramètres par profil
@@ -372,6 +377,7 @@ def _run_event(
     cert: str,
     results: list,
     lock: threading.Lock,
+    vm_id: int = 0,
 ) -> None:
     """
     Exécute un événement du planning :
@@ -393,7 +399,7 @@ def _run_event(
     hs_ms = measure_handshake_once(target, port_tls, mode, cert)
 
     # --- 3. Trafic ---
-    throughput_mbps, retransmit_pct = _run_iperf(target, etype, dur_s)
+    throughput_mbps, retransmit_pct = _run_iperf(target, etype, dur_s, vm_id=vm_id)
     actual_duration = round(time.time() - actual_start, 1)
 
     # --- 4. Enregistrement ---
@@ -425,6 +431,7 @@ def run_schedule(
     port_tls: int,
     mode: str,
     cert: str,
+    vm_id: int = 0,
 ) -> list[dict]:
     """
     Démarre tous les événements en parallèle via des threads.
@@ -438,7 +445,7 @@ def run_schedule(
     for event in schedule:
         t = threading.Thread(
             target=_run_event,
-            args=(event, target, port_tls, mode, cert, results, lock),
+            args=(event, target, port_tls, mode, cert, results, lock, vm_id),
             daemon=True,
         )
         threads.append(t)
@@ -467,6 +474,7 @@ def run_continuous(
     cert: str,
     duration: int = 0,
     output_file: str = "",
+    vm_id: int = 0,
 ) -> list[dict]:
     """
     Lance 5 threads-scheduleurs (un par type de trafic) en boucle continue.
@@ -518,7 +526,7 @@ def run_continuous(
                 break
 
             # ── Trafic iperf3 ──
-            throughput_mbps, retransmit_pct = _run_iperf(target, etype, dur)
+            throughput_mbps, retransmit_pct = _run_iperf(target, etype, dur, vm_id=vm_id)
             actual_dur = round(time.time() - t_event_start, 1)
             offset     = round(t_event_start - t_global_start, 1)
 
@@ -642,6 +650,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         port_tls    = args.port_tls,
         mode        = args.mode,
         cert        = args.cert,
+        vm_id       = args.vm_id,
     )
     elapsed = round(time.time() - t_global, 1)
 
@@ -694,7 +703,7 @@ def main() -> None:
     run_p.add_argument("--output",   required=True,
                        help="Fichier JSON de sortie des résultats")
     run_p.add_argument("--vm-id",   type=int, default=0, dest="vm_id",
-                       help="ID unique de cette VM (1-10) — réservé pour identification")
+                       help="ID unique de cette VM (1-10) — détermine le port voip dédié (5200+id)")
 
     # --- continuous ---
     cont_p = sub.add_parser(
@@ -713,7 +722,7 @@ def main() -> None:
     cont_p.add_argument("--output",   default="",
                         help="Fichier JSON de sortie (optionnel)")
     cont_p.add_argument("--vm-id",   type=int, default=0, dest="vm_id",
-                        help="ID unique de cette VM (1-10) — réservé pour identification")
+                        help="ID unique de cette VM (1-10) — détermine le port voip dédié (5200+id)")
 
     args = parser.parse_args()
 
@@ -729,6 +738,7 @@ def main() -> None:
             cert        = args.cert,
             duration    = args.duration,
             output_file = args.output,
+            vm_id       = args.vm_id,
         )
 
 

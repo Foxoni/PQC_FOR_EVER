@@ -565,11 +565,13 @@ SERVEUR WAN                                        VMs CLIENTES
 | --- | --- | --- |
 | 5201-5210 | TCP+UDP | iperf3 - pool serveur (10 instances independantes, une par port) |
 
-> **Attribution des ports iperf3 :** chaque type de trafic utilise un port dedie : file=5201,
-> voip=5202, stream=5203, web=5204, msg=5205. Cela garantit qu'au sein d'une meme VM les flux
-> simultanes ne se disputent jamais le meme port. La contention inter-VMs (plusieurs VMs lancant le
-> meme type au meme instant) est geree par une logique de retry avec attente de 3 s (3 tentatives
-> max). Les ports 5206-5210 servent a la mesure du jitter UDP (rotation par IP cliente).
+> **Attribution des ports iperf3 :** logique hybride pour eviter toute contention.
+> file=5201, stream=5203, web=5204, msg=5205 : ports fixes par type (isolation intra-VM).
+> voip=5200+vm\_id (ex. VM#3→5203, VM#4→5204) : port dedie par VM pour les sessions longues
+> comme les presets 3+4 (reunion synchronisee) ; fallback 5202 si vm\_id=0.
+> Ports 5206-5210 : mesure jitter UDP (rotation par IP cliente).
+> La contention inter-VMs residuelle sur les autres types est geree par retry (3 × 3 s).
+
 | 8443 | TCP/TLS | Serveur TLS (handshake PQC) |
 | 9998 | TCP | vm_agent - controle par server_cli.py |
 | 9999 | TCP | Port marqueur (detection deploiement par --scan) |
