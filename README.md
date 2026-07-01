@@ -199,7 +199,6 @@ pqc> scan 192.168.1.0/24
 3 agent(s) detecte(s).
 
 # 2. Configurer toutes les VMs (mode et IP auto-detectes depuis le serveur)
-#    Chaque VM reçoit un vm_id base sur son index de scan → port iperf3 dedie
 pqc> set all --preset 2
   [mode auto: hybrid-full]
   [target auto: 192.168.1.1]
@@ -566,11 +565,11 @@ SERVEUR WAN                                        VMs CLIENTES
 | --- | --- | --- |
 | 5201-5210 | TCP+UDP | iperf3 - pool serveur (10 instances independantes, une par port) |
 
-> **Attribution des ports iperf3 :** quand les VMs sont orchestrees via `server_cli.py`, chaque VM
-> reçoit un port dedie lors du `set` (VM #1 → 5201, VM #2 → 5202, etc.) ce qui elimine toute
-> contention entre VMs concurrentes. Les ports 5206-5210 servent aussi a la mesure du jitter UDP
-> (rotation par IP cliente). Sans orchestrateur (`--vm-id` non fourni), les profils utilisent leurs
-> ports historiques : file=5201, voip=5202, stream=5203, web=5204, msg=5205.
+> **Attribution des ports iperf3 :** chaque type de trafic utilise un port dedie : file=5201,
+> voip=5202, stream=5203, web=5204, msg=5205. Cela garantit qu'au sein d'une meme VM les flux
+> simultanes ne se disputent jamais le meme port. La contention inter-VMs (plusieurs VMs lancant le
+> meme type au meme instant) est geree par une logique de retry avec attente de 3 s (3 tentatives
+> max). Les ports 5206-5210 servent a la mesure du jitter UDP (rotation par IP cliente).
 | 8443 | TCP/TLS | Serveur TLS (handshake PQC) |
 | 9998 | TCP | vm_agent - controle par server_cli.py |
 | 9999 | TCP | Port marqueur (detection deploiement par --scan) |
@@ -586,7 +585,7 @@ SERVEUR WAN                                        VMs CLIENTES
 | `oqsprovider not found` apres `--install` | Relancer `sudo ./pqc_bench.sh --install` |
 | `openssl list -providers` ne montre pas `oqsprovider` malgre une installation reussie | Le `.so` a ete installe dans un repertoire different de celui ecrit dans `openssl.cnf` (comportement cmake sur Ubuntu 24+/26+). Verifier avec `find /usr -name "oqsprovider.so"` puis corriger avec `sudo ln -s <chemin_reel> /usr/local/lib/ossl-modules/oqsprovider.so` (creer le dossier si necessaire : `sudo mkdir -p /usr/local/lib/ossl-modules`). Ce bug est corrige dans la version actuelle de `--install` qui detecte le chemin dynamiquement. |
 | `iperf3: connect failed` | Verifier que le serveur tourne et les ports 5201-5210 sont ouverts |
-| Debit nul sur certaines VMs (`0.0 Mbps`) malgre le serveur actif | Faire `scan` puis `set` avant `launch` — sans scan, les VMs n'ont pas de `vm_id` et partagent les memes ports iperf3 (contention) |
+| Debit nul sur certaines VMs (`0.0 Mbps`) malgre le serveur actif | Verifier que `iperf3 -s` tourne sur le serveur (port 5201-5205). Si plusieurs VMs lancent simultanement le meme type de trafic, le retry automatique (3 tentatives × 3 s) gere la contention — augmenter `--duration` si le test est trop court. |
 | `openssl s_client: handshake failure` | Le mode du client et du serveur doivent correspondre |
 | `tc: command not found` | Installer `iproute2` ; sans tc la simulation WAN est desactivee |
 | Resultats trop variables | Augmenter `--hs-count 200` et `--duration 120` |
