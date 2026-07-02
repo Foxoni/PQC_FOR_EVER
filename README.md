@@ -37,7 +37,8 @@ Le banc de test repose sur deux roles :
 ```text
 pqc_bench/
 ├── pqc_bench.sh          # Moteur de test - generation certificats, handshake, trafic
-├── traffic_gen.py        # Module utilitaire (stats, monitoring CPU/RAM, CSV)
+├── traffic_server.py     # Serveur de trafic (TCP :5300, UDP :5301) - lance par --server
+├── traffic_gen.py        # Module utilitaire (stats, monitoring CPU/RAM, clients trafic, CSV)
 ├── traffic_presets.py    # Generateur de trafic - presets + mode continu aleatoire
 ├── vm_agent.py           # Daemon de controle sur chaque VM cliente (port 9998)
 ├── server_cli.py         # CLI central sur le serveur - orchestre toutes les VMs
@@ -47,7 +48,8 @@ pqc_bench/
 | Fichier | Role |
 | --- | --- |
 | `pqc_bench.sh` | Moteur d'execution : certificats, handshake TLS, orchestration trafic, ecriture CSV |
-| `traffic_gen.py` | Stats (min/avg/max/p99), monitoring CPU/RAM psutil, parsing JSON traffic_server, clients trafic individuels, fusion CSV |
+| `traffic_server.py` | Serveur de trafic multi-client (TCP :5300 + UDP :5301) — remplace le pool iperf3, accepte N connexions simultanees sans contention |
+| `traffic_gen.py` | Stats (min/avg/max/p99), monitoring CPU/RAM psutil, clients trafic individuels (cmd client/jitter), parsing JSON, fusion CSV |
 | `traffic_presets.py` | 5 presets PME predefinis + mode aleatoire continu, handshake TLS par connexion |
 | `vm_agent.py` | Daemon TCP sur chaque VM cliente : recoit les ordres du serveur, lance pqc_bench.sh |
 | `server_cli.py` | CLI interactif sur le serveur WAN : scan, configuration, lancement synchronise, collecte |
@@ -117,7 +119,6 @@ openssl list -providers | grep oqs
 ```bash
 git clone https://github.com/Foxoni/PQC_FOR_EVER.git
 cd PQC_FOR_EVER
-chmod +x pqc_bench.sh
 sudo ./pqc_bench.sh --install
 ```
 
@@ -446,10 +447,10 @@ compare_{ts}.csv                    # Comparatif inter-modes (commande compare)
 | `Delai_planifie_s` | Heure de declenchement dans le preset (secondes) | — |
 | `Duree_reelle_s` | Duree effective de l'evenement | — |
 | `Handshake_ms` | Duree du handshake TLS pour cet evenement (ms) | — |
-| `Debit_Mbps` | Debit mesure par iperf3 (Mbps) | — |
+| `Debit_Mbps` | Debit mesure par traffic_server.py (Mbps) | — |
 | `CPU_moy_pct` | CPU moyen de la VM pendant le test | — |
 | `RAM_moy_Mo` | RAM utilisee pendant le test (Mo) | — |
-| `Retransmissions_pct` | Taux de retransmissions TCP | — |
+| `Retransmissions_pct` | Taux de retransmissions TCP (toujours 0.0 avec traffic\_server, non mesure) | — |
 | `Taille_cle_octets` | Taille de la cle privee (octets) | — |
 | `Taille_cert_octets` | Taille du certificat (octets) | — |
 | **Metriques reseau — mesures pendant l'evenement** | | |
@@ -457,9 +458,9 @@ compare_{ts}.csv                    # Comparatif inter-modes (commande compare)
 | `Ping_min_ms` | RTT minimum | ping |
 | `Ping_max_ms` | RTT maximum | ping |
 | `Ping_p99_ms` | RTT 99e percentile | hping3 / ping |
-| `Jitter_ms` | Variation de latence UDP — voip et stream uniquement, -1 sinon | iperf3 |
+| `Jitter_ms` | Variation de latence UDP — voip et stream uniquement, -1 sinon | traffic\_server |
 | `Packet_loss_pct` | Taux de perte global (ICMP) | ping |
-| `Packet_loss_UDP_pct` | Taux de perte UDP — voip et stream uniquement, -1 sinon | iperf3 |
+| `Packet_loss_UDP_pct` | Taux de perte UDP — voip et stream uniquement, -1 sinon | traffic\_server |
 | **Metriques handshake reseau — capture du premier handshake** | | |
 | `Fragmentation_pct` | % de paquets fragmentes pendant le handshake TLS | tshark + sudo |
 | `Handshake_paquets` | Nombre de paquets echanges pendant le handshake | tshark + sudo |
@@ -483,7 +484,7 @@ compare_{ts}.csv                    # Comparatif inter-modes (commande compare)
 | `Debit_moy_Mbps` / `min` / `max` | Statistiques debit (valeurs -1 exclues) |
 | `CPU_moy_pct` | CPU moyen |
 | `RAM_moy_Mo` | RAM moyenne |
-| `Retransmissions_moy_pct` | Taux de retransmissions moyen |
+| `Retransmissions_moy_pct` | Taux de retransmissions moyen (toujours 0.0 avec traffic\_server) |
 | `Ping_moy_ms` / `Ping_min_ms` / `Ping_max_ms` | Statistiques RTT ICMP |
 | `Ping_p99_moy_ms` | Moyenne des p99 de latence entre VMs |
 | `Jitter_moy_ms` | Jitter UDP moyen (voip/stream uniquement) |
@@ -541,7 +542,7 @@ SERVEUR WAN                                        VMs CLIENTES
 | `GLOBAL_ECART_TYPE Handshake_moy_ms` | Variabilite entre VMs (stabilite du test) |
 | `Debit_moy_Mbps` | Degradation du debit sous charge crypto |
 | `CPU_moy_pct` | Cout CPU (ML-DSA bien plus lourd que ML-KEM) |
-| `Retransmissions_moy_pct` | Stabilite reseau sous charge |
+| `Retransmissions_moy_pct` | ~~Stabilite reseau~~ Non mesure avec traffic\_server (toujours 0.0) |
 
 ### Transport reseau
 
