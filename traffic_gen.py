@@ -212,7 +212,7 @@ def _client_tcp(etype: str, target: str, duration: int) -> dict:
 
 def _client_voip(target: str, duration: int) -> dict:
     sid     = random.randint(1, 0x7FFFFFFF)
-    bps     = 30_000_000 / 8
+    bps     = 8_000_000 / 8
     chunk   = 1300
     payload = os.urandom(chunk - _HDR.size)
     stop    = threading.Event()

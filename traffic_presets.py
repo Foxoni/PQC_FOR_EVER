@@ -396,9 +396,9 @@ def _run_traffic_tcp(target: str, etype: str, duration: float) -> tuple[float, f
 
 
 def _run_traffic_voip(target: str, duration: float) -> tuple[float, float]:
-    """UDP bidirectionnel 30 Mbps (simule visioconference) via traffic_server.py."""
+    """UDP bidirectionnel 8 Mbps (simule visioconference 4K) via traffic_server.py."""
     sid      = random.randint(1, 0x7FFFFFFF)
-    bps      = 30_000_000 / 8       # bytes/s envoi client→serveur
+    bps      = 8_000_000 / 8        # bytes/s envoi client→serveur
     chunk    = 1300                  # taille datagramme (MTU-safe)
     payload  = os.urandom(chunk - _UDP_HDR.size)
     stop     = threading.Event()
@@ -460,7 +460,9 @@ def _run_traffic_voip(target: str, duration: float) -> tuple[float, float]:
         ctrl.close()
         return result.get("throughput_mbps", 0.0), 0.0
 
-    except Exception:
+    except Exception as _e:
+        import sys as _sys
+        print(f"[voip] erreur: {_e}", file=_sys.stderr, flush=True)
         try:
             ctrl.close()
         except Exception:

@@ -107,6 +107,8 @@ def _udp_receiver(udp_port: int) -> None:
     global _udp_sock
     _udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     _udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Buffer 4 MB pour absorber les rafales voip (plusieurs VMs simultanees)
+    _udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
     try:
         _udp_sock.bind(("0.0.0.0", udp_port))
     except OSError as e:
@@ -238,8 +240,8 @@ def _recv_data(conn: socket.socket, timeout: float) -> tuple[int, float]:
 def _handle_udp_session(conn: socket.socket, ttype: str,
                          duration: float, sid: int) -> None:
     bps = {
-        "voip":   30_000_000 / 8,
-        "jitter":  1_000_000 / 8,
+        "voip":   8_000_000 / 8,   # 8 Mbps bidir (visioconf 4K realiste)
+        "jitter": 1_000_000 / 8,
     }.get(ttype, 1_000_000 / 8)
 
     ses = _UdpSession(sid, duration, bps)
