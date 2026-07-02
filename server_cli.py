@@ -40,6 +40,110 @@ SCAN_TIMEOUT     = 0.5
 SERVER_MODE_FILE = Path(__file__).resolve().parent / ".server_mode"
 
 
+class _SrvMonitor:
+    """Collecte CPU/RAM/réseau pendant la durée exacte d'un test (launch → results)."""
+
+    def __init__(self):
+        self._thread  = None
+        self._stop    = threading.Event()
+        self._samples = []   # (cpu_pct, ram_mb, rx_bytes_cumul, timestamp)
+        self._iface   = ""
+
+    def start(self, iface: str = "") -> None:
+        self._iface   = iface
+        self._samples = []
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="srv-mon")
+        self._thread.start()
+
+    def stop(self) -> dict:
+        """Arrête le monitoring et retourne les métriques moyennées, ou {} si pas de données."""
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=10)
+            self._thread = None
+
+        if not self._samples:
+            return {}
+
+        cpus     = [s[0] for s in self._samples]
+        rams     = [s[1] for s in self._samples]
+        first_rx = self._samples[0][2]
+        last_rx  = self._samples[-1][2]
+        first_ts = self._samples[0][3]
+        last_ts  = self._samples[-1][3]
+        elapsed  = max(last_ts - first_ts, 1)
+
+        return {
+            "cpu_avg_pct": round(statistics.mean(cpus), 1),
+            "ram_avg_mb":  round(statistics.mean(rams)),
+            "rx_mbps":     round((last_rx - first_rx) * 8 / elapsed / 1e6, 3),
+            "n_samples":   len(self._samples),
+            "elapsed_s":   int(elapsed),
+        }
+
+    # ------------------------------------------------------------------
+    # Lecture /proc (Linux uniquement — silencieux sur autres OS)
+    # ------------------------------------------------------------------
+
+    def _read_cpu(self):
+        try:
+            with open("/proc/stat") as f:
+                for line in f:
+                    if line.startswith("cpu "):
+                        v = [int(x) for x in line.split()[1:8]]
+                        # user nice sys idle iowait irq softirq
+                        return sum(v), v[3] + v[4]   # total, idle+iowait
+        except OSError:
+            pass
+        return 0, 0
+
+    def _read_ram(self):
+        total = avail = 0
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        total = int(line.split()[1])
+                    elif line.startswith("MemAvailable:"):
+                        avail = int(line.split()[1])
+                        break
+        except OSError:
+            pass
+        return (total - avail) // 1024   # Mo
+
+    def _read_rx(self):
+        if not self._iface:
+            return 0
+        target = self._iface + ":"
+        try:
+            with open("/proc/net/dev") as f:
+                for line in f:
+                    parts = line.split()
+                    if parts and parts[0] == target:
+                        return int(parts[1])   # rx bytes cumulés
+        except (OSError, ValueError, IndexError):
+            pass
+        return 0
+
+    def _loop(self):
+        prev_total, prev_idle = self._read_cpu()
+
+        while not self._stop.wait(5):
+            total, idle = self._read_cpu()
+            dt = total - prev_total
+            di = idle  - prev_idle
+            cpu_pct = round((1 - di / dt) * 100, 1) if dt > 0 else 0.0
+            prev_total, prev_idle = total, idle
+
+            self._samples.append((
+                cpu_pct,
+                self._read_ram(),
+                self._read_rx(),
+                time.time(),
+            ))
+
+
 class VM:
     __slots__ = ("ip", "state", "config", "last_seen")
 
@@ -56,6 +160,8 @@ class ServerCLI:
         self.vms    = {}
         self.subnet = default_subnet
         self._idx   = {}   # {1: "192.168.x.y", ...} — assigne par cmd_scan
+        self._mon        = _SrvMonitor()
+        self._mon_result = {}   # rempli par _watch_until_done quand le test se termine
 
     def _resolve(self, target):
         """Convertit 'all', '1', '2,3', ou une IP en liste d'IPs.
@@ -365,6 +471,15 @@ class ServerCLI:
 
         t0 = time.perf_counter()
         go.set()
+        # Monitoring serveur et watcher de fin de test (en background)
+        self._mon_result = {}
+        self._mon.start(iface=self._server_state().get("iface", ""))
+        threading.Thread(
+            target=self._watch_until_done,
+            args=(list(armed),),
+            daemon=True,
+            name="done-watcher",
+        ).start()
         for t in threads:
             t.join(timeout=20)
         print(f"Signal envoye en {(time.perf_counter() - t0) * 1000:.0f} ms")
@@ -375,6 +490,45 @@ class ServerCLI:
                 print(f"  {ip}: demarre (pid {r.get('pid')})")
             else:
                 print(f"  {ip}: ERREUR — {r.get('error')}")
+
+    def _watch_until_done(self, vms: list) -> None:
+        """Thread background: poll les VMs toutes les 10s et notifie quand toutes terminent."""
+        POLL_INTERVAL = 10      # secondes entre chaque poll
+        MAX_WAIT      = 3600    # 1h max (pour les tests très longs ou configurés manuellement)
+
+        deadline = time.time() + MAX_WAIT
+        while time.time() < deadline:
+            time.sleep(POLL_INTERVAL)
+
+            states = {}
+            for ip in vms:
+                r = self._send(ip, {"cmd": "STATUS"}, timeout=5)
+                if r.get("ok"):
+                    s = r.get("state", "unknown")
+                    self.vms.setdefault(ip, VM(ip)).state = s
+                    states[ip] = s
+                else:
+                    states[ip] = "?"
+
+            if not any(s == "running" for s in states.values()):
+                # Arrêter le monitoring exactement à la fin du test
+                self._mon_result = self._mon.stop()
+
+                done_n = sum(1 for s in states.values() if s == "done")
+                other  = {ip: s for ip, s in states.items() if s != "done"}
+                msg = f"\n[TEST TERMINÉ] {done_n}/{len(vms)} VM(s) done"
+                if other:
+                    msg += "  |  " + "  ".join(f"{ip}: {s}" for ip, s in other.items())
+                msg += "\n>>> Tapez 'results' pour collecter les résultats."
+                print(msg, flush=True)
+                print("pqc> ", end="", flush=True)
+                return
+
+        # Timeout : arrêter quand même le monitoring
+        self._mon_result = self._mon.stop()
+        print(f"\n[WATCHER] Aucune notification après {MAX_WAIT // 60} min "
+              f"— vérifiez l'état des VMs avec 'status'.", flush=True)
+        print("pqc> ", end="", flush=True)
 
     def cmd_status(self, args):
         target = args[0] if args else "all"
@@ -576,33 +730,34 @@ class ServerCLI:
         return rows
 
     def _server_metrics_row(self, mode, wan):
-        """Lit le fichier server_metrics_{mode}_*.json produit par pqc_bench.sh et retourne
-        une ligne master CSV représentant l'état du serveur pendant le test."""
-        import json as _json
-        files = sorted(RESULTS_DIR.glob(f"server_metrics_{mode}_*.json"))
-        if not files:
-            print(f"  [INFO] Aucune métrique serveur pour le mode '{mode}' "
-                  f"(le serveur est encore en cours — arrêtez-le d'abord pour inclure cette ligne)")
-            return None
-        try:
-            srv = _json.loads(files[-1].read_text())
-        except Exception as exc:
-            print(f"  [WARN] Métriques serveur illisibles : {exc}")
+        """Arrête le monitoring serveur et retourne une ligne master CSV avec les métriques
+        collectées depuis le lancement du test (launch) jusqu'à maintenant (results)."""
+        # Cas normal : le watcher a déjà arrêté le monitoring et stocké le résultat.
+        # Fallback : results appelé avant la fin détectée → on arrête maintenant.
+        metrics = self._mon_result or self._mon.stop()
+        if not metrics:
+            print("  [INFO] Aucune métrique serveur "
+                  "(le monitoring démarre avec 'launch' — relancez un test complet)")
             return None
 
+        srv_state = self._server_state()
+        source    = srv_state.get("ip", "server")
+        iface     = srv_state.get("iface", "")
+
         row = {k: "" for k in self._MASTER_FIELDS}
-        row["Source"]         = srv.get("source", "server")
-        row["Mode"]           = srv.get("mode", mode)
+        row["Source"]         = source
+        row["Mode"]           = mode
         row["Type_test"]      = "server"
-        row["WAN"]            = srv.get("wan", wan)
-        row["CPU_moy_pct"]    = srv.get("cpu_avg_pct", "")
-        row["RAM_moy_Mo"]     = srv.get("ram_avg_mb", "")
-        row["Debit_moy_Mbps"] = srv.get("rx_mbps", "")
-        print(f"  serveur ({srv.get('source','?')}): "
-              f"CPU={srv.get('cpu_avg_pct','?')}%  "
-              f"RAM={srv.get('ram_avg_mb','?')} Mo  "
-              f"RX={srv.get('rx_mbps','?')} Mbps  "
-              f"iface={srv.get('wan_iface','?')}")
+        row["WAN"]            = wan
+        row["CPU_moy_pct"]    = metrics["cpu_avg_pct"]
+        row["RAM_moy_Mo"]     = metrics["ram_avg_mb"]
+        row["Debit_moy_Mbps"] = metrics["rx_mbps"]
+        print(f"  serveur ({source}): "
+              f"CPU={metrics['cpu_avg_pct']}%  "
+              f"RAM={metrics['ram_avg_mb']} Mo  "
+              f"RX={metrics['rx_mbps']} Mbps  "
+              f"({metrics['n_samples']} échantillons, {metrics['elapsed_s']}s"
+              + (f", iface={iface}" if iface else "") + ")")
         return row
 
     def cmd_results(self, args):
