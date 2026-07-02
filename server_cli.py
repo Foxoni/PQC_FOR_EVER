@@ -575,6 +575,36 @@ class ServerCLI:
             rows.append(r)
         return rows
 
+    def _server_metrics_row(self, mode, wan):
+        """Lit le fichier server_metrics_{mode}_*.json produit par pqc_bench.sh et retourne
+        une ligne master CSV représentant l'état du serveur pendant le test."""
+        import json as _json
+        files = sorted(RESULTS_DIR.glob(f"server_metrics_{mode}_*.json"))
+        if not files:
+            print(f"  [INFO] Aucune métrique serveur pour le mode '{mode}' "
+                  f"(le serveur est encore en cours — arrêtez-le d'abord pour inclure cette ligne)")
+            return None
+        try:
+            srv = _json.loads(files[-1].read_text())
+        except Exception as exc:
+            print(f"  [WARN] Métriques serveur illisibles : {exc}")
+            return None
+
+        row = {k: "" for k in self._MASTER_FIELDS}
+        row["Source"]         = srv.get("source", "server")
+        row["Mode"]           = srv.get("mode", mode)
+        row["Type_test"]      = "server"
+        row["WAN"]            = srv.get("wan", wan)
+        row["CPU_moy_pct"]    = srv.get("cpu_avg_pct", "")
+        row["RAM_moy_Mo"]     = srv.get("ram_avg_mb", "")
+        row["Debit_moy_Mbps"] = srv.get("rx_mbps", "")
+        print(f"  serveur ({srv.get('source','?')}): "
+              f"CPU={srv.get('cpu_avg_pct','?')}%  "
+              f"RAM={srv.get('ram_avg_mb','?')} Mo  "
+              f"RX={srv.get('rx_mbps','?')} Mbps  "
+              f"iface={srv.get('wan_iface','?')}")
+        return row
+
     def cmd_results(self, args):
         RESULTS_DIR.mkdir(exist_ok=True)
 
@@ -637,7 +667,12 @@ class ServerCLI:
             master_rows.append(s)
             vm_summaries.append(s)
 
-        # Lignes globales
+        # Ligne serveur (métriques système collectées pendant le test)
+        srv_row = self._server_metrics_row(mode, wan)
+        if srv_row:
+            master_rows.append(srv_row)
+
+        # Lignes globales (VMs uniquement, serveur exclu)
         master_rows += self._global_rows(vm_summaries, mode, wan, len(vm_summaries))
 
         # Nommage avec auto-increment
@@ -654,7 +689,8 @@ class ServerCLI:
             return
 
         print(f"\nMaster CSV: {outfile}")
-        print(f"  {len(vm_data)} VM(s), {len(vm_summaries)} ligne(s) VM + lignes GLOBAL")
+        srv_note = " + 1 ligne serveur" if srv_row else ""
+        print(f"  {len(vm_data)} VM(s), {len(vm_summaries)} ligne(s) VM{srv_note} + lignes GLOBAL")
         if errors:
             print(f"  VMs sans resultats: {', '.join(errors)}")
 

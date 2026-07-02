@@ -1007,6 +1007,87 @@ wan_remove() {
 # MODE SERVEUR (VM WAN simulé)
 # =============================================================================
 _SERVER_PIDS=()
+_SRV_MODE="unknown"
+_SRV_WAN="?"
+_SRV_MON_PID=0
+_SRV_MON_FILE=""
+
+_server_monitor_start() {
+    _SRV_MON_FILE=$(mktemp /tmp/pqc_srv_mon_XXXXX.dat 2>/dev/null) || {
+        log_warn "Impossible de créer le fichier temporaire de monitoring serveur"
+        return 0
+    }
+    (
+        # Première lecture pour initialiser les deltas CPU
+        read -r _ cu cn cs ci cw cr cs2 _ < <(grep '^cpu ' /proc/stat 2>/dev/null) || true
+        prev_total=$((cu + cn + cs + ci + cw + cr + cs2))
+        prev_idle=$((ci + cw))
+
+        while true; do
+            sleep 5
+            read -r _ cu cn cs ci cw cr cs2 _ < <(grep '^cpu ' /proc/stat 2>/dev/null) || continue
+            total=$((cu + cn + cs + ci + cw + cr + cs2))
+            dt=$((total - prev_total))
+            di=$(( (ci + cw) - prev_idle ))
+            [[ $dt -gt 0 ]] \
+                && cpu_pct=$(awk "BEGIN{printf \"%.1f\",(1-$di/$dt)*100}") \
+                || cpu_pct=0
+            prev_total=$total
+            prev_idle=$((ci + cw))
+
+            ram_used=$(awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{printf "%.0f",(t-a)/1024}' \
+                /proc/meminfo 2>/dev/null) || ram_used=0
+
+            rx=0; tx=0
+            [[ -n "${_WAN_IFACE:-}" ]] && \
+                read -r rx tx < <(awk -v iface="${_WAN_IFACE}:" \
+                    '$1==iface{print $2,$10}' /proc/net/dev 2>/dev/null) || true
+
+            echo "$cpu_pct $ram_used $rx $tx $(date +%s)"
+        done
+    ) >> "$_SRV_MON_FILE" &
+    _SRV_MON_PID=$!
+    log_info "Monitoring serveur démarré (PID $_SRV_MON_PID)"
+}
+
+_server_monitor_stop() {
+    [[ ${_SRV_MON_PID:-0} -gt 0 ]] && { kill "$_SRV_MON_PID" 2>/dev/null || true; _SRV_MON_PID=0; }
+    [[ ! -f "${_SRV_MON_FILE:-}" ]] && return 0
+
+    local n=0 cpu_sum=0 ram_sum=0
+    local first_rx=0 first_tx=0 first_ts=0 last_rx=0 last_tx=0 last_ts=0
+    local cpu_pct ram_used rx tx ts
+
+    while read -r cpu_pct ram_used rx tx ts; do
+        [[ $n -eq 0 ]] && { first_rx=$rx; first_tx=$tx; first_ts=$ts; }
+        last_rx=$rx; last_tx=$tx; last_ts=$ts
+        cpu_sum=$(awk "BEGIN{printf \"%.2f\",$cpu_sum+$cpu_pct}")
+        ram_sum=$(awk "BEGIN{printf \"%.0f\",$ram_sum+$ram_used}")
+        n=$((n + 1))
+    done < "$_SRV_MON_FILE"
+    rm -f "$_SRV_MON_FILE"
+
+    [[ $n -eq 0 ]] && return 0
+
+    local cpu_avg ram_avg rx_mbps elapsed server_ip mfile
+    cpu_avg=$(awk "BEGIN{printf \"%.1f\",$cpu_sum/$n}")
+    ram_avg=$(awk "BEGIN{printf \"%.0f\",$ram_sum/$n}")
+    elapsed=$(( last_ts - first_ts ))
+    if [[ $elapsed -gt 0 ]]; then
+        rx_mbps=$(awk "BEGIN{printf \"%.3f\",($last_rx-$first_rx)*8/$elapsed/1000000}")
+    else
+        rx_mbps=0
+    fi
+
+    server_ip="${SERVER_IP:-$(local_ip)}"
+    mkdir -p "$OUTPUT_DIR"
+    mfile="${OUTPUT_DIR}/server_metrics_${_SRV_MODE}_$(timestamp).json"
+    printf '{\n  "source": "%s",\n  "mode": "%s",\n  "wan": "%s",\n  "type_test": "server",\n  "cpu_avg_pct": %s,\n  "ram_avg_mb": %s,\n  "rx_mbps": %s,\n  "wan_iface": "%s"\n}\n' \
+        "$server_ip" "$_SRV_MODE" "$_SRV_WAN" \
+        "$cpu_avg" "$ram_avg" "$rx_mbps" "${_WAN_IFACE:-}" \
+        > "$mfile"
+    log_ok "Métriques serveur ($n échantillons, durée $((elapsed))s) → $mfile"
+}
 
 _cleanup_server() {
     log_info "Arrêt du serveur..."
@@ -1018,6 +1099,7 @@ _cleanup_server() {
     pkill -f "openssl s_server"   2>/dev/null || true
     pkill -f "traffic_server.py"  2>/dev/null || true
     sleep 0.3
+    _server_monitor_stop
     rm -f "${SCRIPT_DIR}/.server_mode"
     [[ $EUID -eq 0 ]] && wan_remove
     rm -rf "$CERT_DIR"
@@ -1123,6 +1205,10 @@ cmd_server() {
 
     log_ok "Serveur prêt — IP: ${bind_ip} | TLS: :${PORT_TLS} | traffic: TCP:${TRAFFIC_PORT} UDP:${TRAFFIC_UDP_PORT}"
     log_ok "Ctrl+C pour arrêter"
+    _SRV_MODE="$mode"
+    _SRV_WAN="$wan_profile"
+    rm -f "${OUTPUT_DIR}"/server_metrics_"${mode}"_*.json 2>/dev/null || true
+    _server_monitor_start
     wait
 }
 
