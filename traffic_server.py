@@ -107,8 +107,11 @@ def _udp_receiver(udp_port: int) -> None:
     global _udp_sock
     _udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     _udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    # Buffer 4 MB pour absorber les rafales voip (plusieurs VMs simultanees)
-    _udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+    try:
+        # 4 MB pour absorber les rafales voip simultanees (necessite root ou rmem_max suffisant)
+        _udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+    except OSError:
+        pass  # systeme limite le buffer, on continue avec la valeur par defaut
     try:
         _udp_sock.bind(("0.0.0.0", udp_port))
     except OSError as e:

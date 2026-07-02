@@ -941,19 +941,42 @@ _WAN_IFACE=""
 wan_apply() {
     local profile="${1:-eu}"
 
-    # Trouver l'interface qui porte l'IP du serveur (interface LAN vers les VMs).
-    # net_iface() utilise "ip route get 1.1.1.1" et retourne l'interface internet,
-    # ce qui est incorrect sur un serveur à deux NICs (LAN + WAN/internet).
-    local bind_ip="${SERVER_IP:-$(local_ip)}"
-    if [[ -n "$bind_ip" ]]; then
+    if [[ -n "$SERVER_IP" ]]; then
+        # IP explicite via --server-ip : trouver l'interface qui la porte
         _WAN_IFACE=$(ip -o addr show \
-            | awk -v ip="$bind_ip" '/inet /{split($4,a,"/"); if(a[1]==ip){print $2; exit}}')
-    fi
-    [[ -z "$_WAN_IFACE" ]] && _WAN_IFACE=$(net_iface)
-
-    if [[ -z "$_WAN_IFACE" ]]; then
-        log_warn "Interface réseau introuvable — simulation WAN désactivée"
-        return 0
+            | awk -v ip="$SERVER_IP" '/inet /{split($4,a,"/"); if(a[1]==ip){print $2; exit}}')
+        if [[ -z "$_WAN_IFACE" ]]; then
+            log_error "Aucune interface ne porte l'IP $SERVER_IP — vérifiez --server-ip"
+            return 1
+        fi
+    else
+        # Pas de --server-ip : compter les interfaces non-loopback avec une IPv4 globale
+        local -a ifaces
+        mapfile -t ifaces < <(ip -o addr show scope global | awk '/inet /{print $2}' | sort -u)
+        case "${#ifaces[@]}" in
+            0)
+                log_warn "Aucune interface réseau détectée — simulation WAN désactivée"
+                return 0
+                ;;
+            1)
+                _WAN_IFACE="${ifaces[0]}"
+                local auto_ip
+                auto_ip=$(ip -o addr show dev "$_WAN_IFACE" \
+                    | awk '/inet /{split($4,a,"/"); print a[1]; exit}')
+                log_info "Interface auto-détectée : $_WAN_IFACE ($auto_ip)"
+                ;;
+            *)
+                log_error "Plusieurs interfaces réseau détectées — impossible de choisir automatiquement."
+                log_error "Relancez avec --server-ip <IP> en précisant l'IP de l'interface LAN vers les VMs :"
+                local _if _ip
+                for _if in "${ifaces[@]}"; do
+                    _ip=$(ip -o addr show dev "$_if" \
+                        | awk '/inet /{split($4,a,"/"); print a[1]; exit}')
+                    log_error "    $_if  →  $_ip"
+                done
+                return 1
+                ;;
+        esac
     fi
 
     local delay="${WAN_DELAY[$profile]:-35ms}"
@@ -974,7 +997,8 @@ wan_apply() {
 }
 
 wan_remove() {
-    [[ -z "${_WAN_IFACE:-}" ]] && _WAN_IFACE=$(net_iface)
+    # Si _WAN_IFACE est vide (wan_apply n'a pas abouti), rien à nettoyer
+    [[ -z "${_WAN_IFACE:-}" ]] && return 0
     tc qdisc del dev "$_WAN_IFACE" root 2>/dev/null || true
     log_ok "Règle netem supprimée sur $_WAN_IFACE"
 }
@@ -1023,12 +1047,13 @@ cmd_server() {
     crypto_gen_certs "$mode"
 
     # Latence WAN (requiert root)
+    trap '_cleanup_server' EXIT INT TERM
     if [[ $EUID -eq 0 ]]; then
-        wan_apply "$wan_profile"
-        trap '_cleanup_server' EXIT INT TERM
+        if ! wan_apply "$wan_profile"; then
+            exit 1
+        fi
     else
         log_warn "Non-root : simulation WAN désactivée (relancez avec sudo)"
-        trap '_cleanup_server' EXIT INT TERM
     fi
 
     # Nettoyer une éventuelle instance traffic_server résiduelle
@@ -1356,12 +1381,14 @@ ${BOLD}MODES DISPONIBLES :${NC}
 ${BOLD}OPTIONS :${NC}
   --wan-profile <WAN>   Latence injectee : fr (15ms) | eu (35ms) | us (80ms)
                         Necessite sudo  (tc-netem sur l'interface sortante)
-  --server-ip <IP>      Force l'IP ecrite dans .server_mode (utile si plusieurs
-                        interfaces reseau — server_cli.py lit ce fichier)
+  --server-ip <IP>      IP de l'interface LAN vers les VMs.
+                        Obligatoire si le serveur a plusieurs interfaces réseau
+                        (le script s'arrete avec la liste des interfaces detectees).
+                        Avec une seule interface, detection automatique.
 
 ${BOLD}EXEMPLES :${NC}
-  sudo $0 --server --mode hybrid-full --wan-profile eu
-  sudo $0 --server --mode classic     --wan-profile fr --server-ip 192.168.1.1
+  sudo $0 --server --mode hybrid-full --wan-profile eu                            # 1 interface
+  sudo $0 --server --mode classic     --wan-profile fr --server-ip 192.168.1.1   # multi-NIC
 
 ${BOLD}NOTE :${NC}
   Le mode choisi ici est transmis automatiquement aux VMs clientes via .server_mode.
