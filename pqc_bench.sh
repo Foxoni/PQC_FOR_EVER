@@ -4,7 +4,7 @@
 # Projet de recherche — Guardia Cybersecurity School
 #
 # Usage : ./pqc_bench.sh --help
-# Dépendances : iperf3, openssl 3.x, oqs-provider, python3, nmap, tc
+# Dépendances : openssl 3.x, oqs-provider, python3, nmap, tc
 # =============================================================================
 
 set -euo pipefail
@@ -39,13 +39,8 @@ COLLECT_FILE=""
 # =============================================================================
 PORT_TLS=8443
 PORT_MARKER=9999
-PORT_IPERF_FILE=5201
-PORT_IPERF_VOIP=5202
-PORT_IPERF_STREAM=5203
-PORT_IPERF_WEB=5204
-PORT_IPERF_MSG=5205
-PORT_IPERF_JITTER=5210  # port dédié mesure jitter (ne partage pas avec les profils trafic)
-# Le pool serveur écoute de 5201 à 5210 (une instance par port)
+TRAFFIC_PORT=5300      # TCP : file, stream, web, msg, voip (controle), jitter
+TRAFFIC_UDP_PORT=5301  # UDP : voip et jitter (donnees bidirectionnelles)
 
 # =============================================================================
 # SUITES DE CHIFFREMENT TLS 1.3
@@ -162,7 +157,7 @@ cmd_install() {
 
     apt-get update -qq || log_warn "apt-get update a échoué — les paquets peuvent être obsolètes"
     apt-get install -y \
-        nmap iperf3 hping3 fping tcpdump tshark \
+        nmap hping3 fping tcpdump tshark \
         openssl python3 python3-pip \
         curl wget git cmake gcc g++ \
         libtool libssl-dev pkg-config \
@@ -256,13 +251,15 @@ CONF
 
 check_deps() {
     local all_ok=true
-    for cmd in iperf3 openssl python3 ip tc; do
+    for cmd in openssl python3 ip tc; do
         has_cmd "$cmd" || { log_warn "Commande manquante : $cmd"; all_ok=false; }
     done
     openssl list -providers 2>/dev/null | grep -q oqsprovider \
         || log_warn "oqs-provider absent → modes PQC indisponibles (sudo $0 --install)"
     [[ -f "$SCRIPT_PY" ]] \
         || log_warn "traffic_gen.py introuvable dans $SCRIPT_DIR"
+    [[ -f "$SCRIPT_DIR/traffic_server.py" ]] \
+        || log_warn "traffic_server.py introuvable dans $SCRIPT_DIR — trafic indisponible"
 
     # Outils optionnels — absence = métriques réseau partielles (-1 dans le CSV)
     has_cmd hping3  || log_warn "hping3 absent  → TCP_connect_ms et Ping_p99_ms indisponibles"
@@ -353,45 +350,17 @@ else:
     rm -f "$_PING_FILE"; _PING_FILE=""
 }
 
-# Lance un flux iperf3 UDP en arrière-plan pour mesurer jitter + perte UDP.
+# Lance une mesure jitter UDP en arrière-plan via traffic_server.py.
 # Pertinent uniquement sur voip/stream — utilisé au niveau du run global.
 net_jitter_start() {
     local target="$1" duration="${2:-60}"
-    if ! has_cmd iperf3; then
-        log_warn "iperf3 absent — métriques jitter/perte UDP indisponibles"
+    if [[ ! -f "$SCRIPT_DIR/traffic_server.py" ]]; then
+        log_warn "traffic_server.py absent — métriques jitter/perte UDP indisponibles"
         _JITTER_PID=0; return
     fi
     _JITTER_FILE="/tmp/pqc_jitter_$$.json"
-
-    # Pool de 5 ports dédiés (5206-5210), un par VM idéalement.
-    # Point de départ basé sur l'IP → réduit les collisions initiales.
-    # Si le port est occupé (iperf3 busy), on tourne vers le suivant (max 5 tentatives).
-    local last_octet
-    last_octet=$(local_ip | awk -F. '{print $NF+0}')
-
-    local attempt jitter_port err
-    for (( attempt=0; attempt<5; attempt++ )); do
-        jitter_port=$(( 5206 + (last_octet + attempt) % 5 ))
-        rm -f "$_JITTER_FILE"
-        iperf3 -c "$target" -p "$jitter_port" -u -b 1M -t "$duration" \
-            --json -i 0 > "$_JITTER_FILE" 2>&1 &
-        _JITTER_PID=$!
-        sleep 0.3
-        if kill -0 "$_JITTER_PID" 2>/dev/null; then
-            return  # démarré avec succès
-        fi
-        # Lire l'erreur iperf3 pour décider de retenter ou non
-        err=$(grep -oP '(?<=error - ).*' "$_JITTER_FILE" 2>/dev/null | head -1 || true)
-        if [[ "$err" != *"busy"* ]] && [[ $attempt -eq 0 ]]; then
-            # Erreur non liée à la contention → inutile de retenter
-            break
-        fi
-        [[ $attempt -lt 4 ]] && sleep 2
-    done
-
-    err=$(grep -oP '(?<=error - ).*' "$_JITTER_FILE" 2>/dev/null | head -1 || true)
-    log_warn "iperf3 UDP jitter : tous les ports 5206-5210 indisponibles sur $target${err:+ — $err}"
-    _JITTER_PID=0
+    python3 "$SCRIPT_PY" jitter "$target" "$duration" "$_JITTER_FILE" &
+    _JITTER_PID=$!
 }
 
 net_jitter_stop() {
@@ -404,8 +373,8 @@ net_jitter_stop() {
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-    s = d.get("end", {}).get("sum", {})
-    print(round(s.get("jitter_ms", -1), 3), round(s.get("lost_percent", -1), 3))
+    print(round(float(d.get("jitter_ms", -1)), 3),
+          round(float(d.get("lost_pct",   -1)), 3))
 except Exception:
     print(-1, -1)
 PYEOF
@@ -751,11 +720,8 @@ TRAFFIC_RESULTS=()
 traffic_web() {
     local target="$1" duration="$2"
     local result="/tmp/pqc_web_$$.json"
-    log_info "  [web]    navigation HTTP — bursts TCP, petits paquets"
-
-    iperf3 -c "$target" -p "$PORT_IPERF_WEB" -t "$duration" \
-        -l 512 -b 2M \
-        --json > "$result" 2>/dev/null &
+    log_info "  [web]    navigation HTTP — bursts TCP, petits paquets, 2 Mbps"
+    python3 "$SCRIPT_PY" client web "$target" "$duration" "$result" &
     TRAFFIC_PIDS+=($!)
     TRAFFIC_RESULTS+=("web:$result")
 }
@@ -765,24 +731,17 @@ traffic_file() {
     local target="$1" duration="$2"
     local result="/tmp/pqc_file_$$.json"
     log_info "  [file]   upload/download PDF — TCP soutenu, gros buffers"
-
-    iperf3 -c "$target" -p "$PORT_IPERF_FILE" -t "$duration" \
-        -l 65536 \
-        --json > "$result" 2>/dev/null &
+    python3 "$SCRIPT_PY" client file "$target" "$duration" "$result" &
     TRAFFIC_PIDS+=($!)
     TRAFFIC_RESULTS+=("file:$result")
 }
 
-# --- Visioconférence : UDP, paquets réguliers ~1300 B, bidirectionnel ---
+# --- Visioconférence : UDP bidirectionnel 30 Mbps ---
 traffic_voip() {
     local target="$1" duration="$2"
     local result="/tmp/pqc_voip_$$.json"
     log_info "  [voip]   visioconférence — UDP 1300B, ~30 Mbps, bidir"
-
-    iperf3 -c "$target" -p "$PORT_IPERF_VOIP" -t "$duration" \
-        -u -b 30M -l 1300 \
-        --bidir \
-        --json > "$result" 2>/dev/null &
+    python3 "$SCRIPT_PY" client voip "$target" "$duration" "$result" &
     TRAFFIC_PIDS+=($!)
     TRAFFIC_RESULTS+=("voip:$result")
 }
@@ -792,23 +751,17 @@ traffic_stream() {
     local target="$1" duration="$2"
     local result="/tmp/pqc_stream_$$.json"
     log_info "  [stream] streaming vidéo — TCP inverse, haut débit"
-
-    iperf3 -c "$target" -p "$PORT_IPERF_STREAM" -t "$duration" \
-        -R -l 8192 \
-        --json > "$result" 2>/dev/null &
+    python3 "$SCRIPT_PY" client stream "$target" "$duration" "$result" &
     TRAFFIC_PIDS+=($!)
     TRAFFIC_RESULTS+=("stream:$result")
 }
 
-# --- Messagerie : très petits paquets TCP, faible bande passante ---
+# --- Messagerie : très petits paquets TCP, 200 Kbps ---
 traffic_msg() {
     local target="$1" duration="$2"
     local result="/tmp/pqc_msg_$$.json"
-    log_info "  [msg]    messagerie/email — TCP 150B, 200Kbps (port $PORT_IPERF_MSG)"
-
-    iperf3 -c "$target" -p "$PORT_IPERF_MSG" -t "$duration" \
-        -l 150 -b 200K \
-        --json > "$result" 2>/dev/null &
+    log_info "  [msg]    messagerie/email — TCP 150B, 200 Kbps"
+    python3 "$SCRIPT_PY" client msg "$target" "$duration" "$result" &
     TRAFFIC_PIDS+=($!)
     TRAFFIC_RESULTS+=("msg:$result")
 }
@@ -856,7 +809,7 @@ TCP_connect_ms,TTFB_ms,Connexions_echec"
             [[ -f "$result_file" ]] || continue
 
             IFS=' ' read -r throughput retransmit < <(
-                python3 "$SCRIPT_PY" parse_iperf "$result_file"
+                python3 "$SCRIPT_PY" parse_traffic "$result_file"
             )
 
             # Jitter et perte UDP uniquement sur voip et stream
@@ -1037,9 +990,9 @@ _cleanup_server() {
     for pid in "${_SERVER_PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
-    # openssl s_server tourne dans un subshell et peut survivre au kill du parent
-    pkill -f "openssl s_server" 2>/dev/null || true
-    pkill -f "iperf3 -s"        2>/dev/null || true
+    # openssl s_server et traffic_server tournent en subshell — peuvent survivre au kill du parent
+    pkill -f "openssl s_server"   2>/dev/null || true
+    pkill -f "traffic_server.py"  2>/dev/null || true
     sleep 0.3
     rm -f "${SCRIPT_DIR}/.server_mode"
     [[ $EUID -eq 0 ]] && wan_remove
@@ -1078,29 +1031,27 @@ cmd_server() {
         trap '_cleanup_server' EXIT INT TERM
     fi
 
-    # Nettoyer les éventuelles instances iperf3 résiduelles avant de démarrer
-    pkill -f "iperf3 -s" 2>/dev/null || true
+    # Nettoyer une éventuelle instance traffic_server résiduelle
+    pkill -f "traffic_server.py" 2>/dev/null || true
     sleep 0.2
 
-    # Pool iperf3 serveur — une instance par port
-    log_info "Démarrage pool iperf3 (ports 5201–5210)..."
-    local port failed_ports=()
-    for port in $(seq 5201 5210); do
-        rm -f "/tmp/iperf3_${port}.log"
-        iperf3 -s -p "$port" --logfile "/tmp/iperf3_${port}.log" &
-        _SERVER_PIDS+=($!)
-    done
-    sleep 0.5   # laisser les instances démarrer
-    for port in $(seq 5201 5210); do
-        if grep -q "error\|failed\|bind" "/tmp/iperf3_${port}.log" 2>/dev/null; then
-            failed_ports+=("$port")
-        fi
-    done
-    if [[ ${#failed_ports[@]} -gt 0 ]]; then
-        # IFS=' ' pour joindre les ports avec des espaces (pas \n)
-        log_warn "iperf3 : échec sur port(s) $(IFS=' '; echo "${failed_ports[*]}") (port déjà utilisé ?)"
+    # Serveur de trafic custom (remplace le pool iperf3)
+    if [[ ! -f "$SCRIPT_DIR/traffic_server.py" ]]; then
+        log_warn "traffic_server.py introuvable — les métriques de débit seront indisponibles"
     else
-        log_ok "Pool iperf3 prêt (10 instances)"
+        log_info "Démarrage traffic_server.py (TCP :$TRAFFIC_PORT  UDP :$TRAFFIC_UDP_PORT)..."
+        local ts_log="/tmp/traffic_server_$$.log"
+        python3 "$SCRIPT_DIR/traffic_server.py" \
+            --tcp-port "$TRAFFIC_PORT" \
+            --udp-port "$TRAFFIC_UDP_PORT" \
+            > "$ts_log" 2>&1 &
+        _SERVER_PIDS+=($!)
+        sleep 0.5
+        if grep -q "pret" "$ts_log" 2>/dev/null; then
+            log_ok "traffic_server prêt (TCP :$TRAFFIC_PORT  UDP :$TRAFFIC_UDP_PORT)"
+        else
+            log_warn "traffic_server.py peut ne pas avoir démarré — vérifiez $ts_log"
+        fi
     fi
 
     # Serveur TLS (boucle pour accepter des connexions successives)
@@ -1145,7 +1096,7 @@ cmd_server() {
     local bind_ip="${SERVER_IP:-$(local_ip)}"
     printf "mode=%s\nip=%s\n" "$mode" "$bind_ip" > "${SCRIPT_DIR}/.server_mode"
 
-    log_ok "Serveur prêt — IP: ${bind_ip} | TLS: :${PORT_TLS} | iperf3: :5201-5210"
+    log_ok "Serveur prêt — IP: ${bind_ip} | TLS: :${PORT_TLS} | traffic: TCP:${TRAFFIC_PORT} UDP:${TRAFFIC_UDP_PORT}"
     log_ok "Ctrl+C pour arrêter"
     wait
 }
@@ -1251,7 +1202,7 @@ cmd_test() {
 # =============================================================================
 # MODE TRAFIC ALÉATOIRE CONTINU
 # Appelle traffic_presets.py continuous — 5 schedulers en boucle,
-# un handshake PQC + iperf3 par connexion, jusqu'à --duration ou Ctrl+C.
+# un handshake PQC + traffic_server par connexion, jusqu'à --duration ou Ctrl+C.
 # =============================================================================
 cmd_random() {
     [[ -z "$TARGET" ]] && die "--target <IP> requis"

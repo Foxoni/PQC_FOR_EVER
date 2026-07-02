@@ -16,21 +16,24 @@ import json
 import os
 import random
 import signal
+import socket
+import struct
 import subprocess
 import threading
 import time
 from typing import Any
 
 # =============================================================================
-# PORTS IPERF3 — doivent correspondre au pool serveur (5201-5210)
+# PORTS traffic_server.py — serveur de trafic custom (remplace iperf3)
 # =============================================================================
-IPERF_PORT: dict[str, int] = {
-    "file":   5201,
-    "voip":   5202,
-    "stream": 5203,
-    "web":    5204,
-    "msg":    5205,
-}
+TRAFFIC_PORT     = 5300   # TCP : file, stream, web, msg, voip (controle), jitter
+TRAFFIC_UDP_PORT = 5301   # UDP : voip et jitter (donnees bidirectionnelles)
+
+# Header datagram UDP : magic(4) + session_id(4) + seq(4) + send_us(8) = 20 octets
+_UDP_HDR   = struct.Struct("!IIIQ")
+_UDP_MAGIC = 0xBEEFCAFE
+
+TRAFFIC_TYPES = ("file", "voip", "stream", "web", "msg")
 
 # =============================================================================
 # CONFIG OPENSSL PAR MODE
@@ -61,8 +64,8 @@ OPENSSL_CFG: dict[str, dict] = {
 # }
 #
 # REMARQUES IMPORTANTES :
-# - Deux événements du même type ne se chevauchent JAMAIS dans un même preset
-#   (un seul port iperf3 disponible par type).
+# - Deux événements du même type peuvent se chevaucher sans problème — traffic_server.py
+#   accepte N connexions simultanées sans contention de port.
 # - Les presets 3 et 4 partagent une réunion vidéo démarrant à t≈22-23s,
 #   simulant une équipe qui rejoint le même meeting avec 1s de décalage réaliste.
 # - Le décalage dans les délais signifie que les handshakes PQC sont répartis
@@ -294,76 +297,175 @@ def measure_handshake_once(target: str, port: int, mode: str, cert: str) -> int:
     return int((time.monotonic() - t0) * 1000)
 
 # =============================================================================
-# EXÉCUTEUR IPERF3 PAR TYPE
+# CLIENT TRAFFIC_SERVER.PY — remplace iperf3, zero contention de port
 # =============================================================================
 
-def _run_iperf(target: str, etype: str, duration: float, vm_id: int = 0) -> tuple[float, float]:
-    """
-    Lance iperf3 selon le profil de trafic.
-    Retourne (throughput_mbps, retransmit_pct).
-    voip utilise un port par VM (5200+vm_id) pour éviter la contention inter-VMs
-    sur les sessions longues (réunion synchronisée presets 3+4).
-    """
-    if etype == "voip" and vm_id > 0:
-        port = 5200 + vm_id
+def _recv_line_tcp(sock: socket.socket, timeout: float = 15.0) -> str:
+    sock.settimeout(timeout)
+    buf = b""
+    while b"\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    return buf.split(b"\n")[0].decode(errors="replace")
+
+
+def _tcp_upload(sock: socket.socket, duration: float, bps: float | None, chunk_size: int) -> None:
+    """Envoie des donnees pendant `duration` secondes avec rate-limit optionnel."""
+    payload = bytes(chunk_size)
+    end     = time.monotonic() + duration
+    if bps is None:
+        while time.monotonic() < end:
+            try:
+                sock.sendall(payload)
+            except OSError:
+                break
     else:
-        port = IPERF_PORT[etype]
-    dur  = str(int(duration))
+        bytes_per_s = bps / 8
+        tokens      = 0.0
+        last        = time.monotonic()
+        while time.monotonic() < end:
+            now    = time.monotonic()
+            tokens += (now - last) * bytes_per_s
+            last   = now
+            if tokens >= chunk_size:
+                try:
+                    sock.sendall(payload)
+                    tokens -= chunk_size
+                except OSError:
+                    break
+            else:
+                time.sleep(max(0.0, (chunk_size - tokens) / bytes_per_s * 0.8))
 
-    # Paramètres par profil
-    extra: list[str] = {
-        "file":   ["-l", "65536"],                            # TCP large buffer (gros fichier)
-        "voip":   ["-u", "-b", "30M", "-l", "1300", "--bidir"],  # UDP 1300B bidir (visio)
-        "stream": ["-R", "-l", "8192"],                       # TCP reverse (streaming descend.)
-        "web":    ["-l", "512", "-b", "2M"],                  # TCP petits paquets (web)
-        "msg":    ["-l", "150", "-b", "200K"],                # TCP très petits paquets (msg)
-    }.get(etype, [])
 
-    cmd = ["iperf3", "-c", target, "-p", str(port), "-t", dur, "--json"] + extra
+def _run_traffic(target: str, etype: str, duration: float) -> tuple[float, float]:
+    """
+    Remplace _run_iperf(). Connexion au traffic_server.py via TCP 5300 (ou UDP 5301 pour voip).
+    Retourne (throughput_mbps, 0.0) — sans retransmissions (metrique non pertinente).
+    Supporte N connexions simultanées sans contention de port.
+    """
+    if etype == "voip":
+        return _run_traffic_voip(target, duration)
+    return _run_traffic_tcp(target, etype, duration)
 
-    # Retry si le serveur iperf3 est occupé (un seul client à la fois par port).
-    # Plusieurs VMs peuvent se disputer le même port → "Connection refused" ou "server busy".
-    data: dict = {}
+
+def _run_traffic_tcp(target: str, etype: str, duration: float) -> tuple[float, float]:
+    # bps limite en bits/s (None = illimite) ; chunk en octets
+    BPS    = {"web": 2_000_000, "msg": 200_000}
+    CHUNKS = {"file": 65536, "stream": 65536, "web": 512, "msg": 150}
+
+    bps        = BPS.get(etype)            # None pour file/stream
+    chunk_size = CHUNKS.get(etype, 4096)
+    upload     = (etype != "stream")      # stream = serveur envoie vers client
+
     for attempt in range(3):
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=duration + 15,
-            )
-            data = json.loads(proc.stdout)
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, ValueError):
-            return 0.0, 0.0
+            with socket.create_connection((target, TRAFFIC_PORT), timeout=10) as sock:
+                req = json.dumps({"type": etype, "duration": duration})
+                sock.sendall((req + "\n").encode())
+                resp = json.loads(_recv_line_tcp(sock))
+                if not resp.get("ready"):
+                    return 0.0, 0.0
 
-        err = data.get("error", "")
-        if err and ("busy" in err.lower() or "refused" in err.lower() or "unable to connect" in err.lower()):
+                if upload:
+                    _tcp_upload(sock, duration, bps, chunk_size)
+                    try:
+                        sock.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                else:
+                    # stream : drainer les donnees envoyees par le serveur
+                    sock.settimeout(2.0)
+                    try:
+                        while sock.recv(65536):
+                            pass
+                    except (socket.timeout, OSError):
+                        pass
+
+                result = json.loads(_recv_line_tcp(sock, timeout=duration + 30))
+                return result.get("throughput_mbps", 0.0), 0.0
+
+        except (ConnectionRefusedError, OSError):
             if attempt < 2:
                 time.sleep(3)
-                continue
+        except Exception:
             return 0.0, 0.0
-        break  # succès ou erreur non-retry
 
-    end = data.get("end", {})
+    return 0.0, 0.0
 
-    # Débit : cherche dans sum_received en priorité (TCP), puis sum_sent, puis sum
-    bps = 0.0
-    for key in ("sum_received", "sum_sent", "sum"):
-        if key in end:
-            bps = end[key].get("bits_per_second", 0.0)
-            break
-    # Mode bidir (voip) : prend le max des deux sens
-    if "sum_bidir_reverse" in end:
-        bps = max(bps, end["sum_bidir_reverse"].get("bits_per_second", 0.0))
 
-    # Retransmissions TCP — sum_sent n'a pas de champ "packets" pour TCP (c'est UDP qui l'a).
-    # On estime le nombre de segments utiles depuis les octets transférés (MSS typique 1460).
-    sent        = end.get("sum_sent", {})
-    retrans     = sent.get("retransmits", 0) or 0
-    bytes_sent  = sent.get("bytes", 0) or 0
-    useful_segs = bytes_sent / 1460
-    total_segs  = useful_segs + retrans
-    retransmit_pct = round(retrans / total_segs * 100, 3) if total_segs > 0 else 0.0
+def _run_traffic_voip(target: str, duration: float) -> tuple[float, float]:
+    """UDP bidirectionnel 30 Mbps (simule visioconference) via traffic_server.py."""
+    sid      = random.randint(1, 0x7FFFFFFF)
+    bps      = 30_000_000 / 8       # bytes/s envoi client→serveur
+    chunk    = 1300                  # taille datagramme (MTU-safe)
+    payload  = os.urandom(chunk - _UDP_HDR.size)
+    stop     = threading.Event()
 
-    return round(bps / 1e6, 2), retransmit_pct
+    try:
+        ctrl = socket.create_connection((target, TRAFFIC_PORT), timeout=10)
+        req  = json.dumps({"type": "voip", "duration": duration, "session_id": sid})
+        ctrl.sendall((req + "\n").encode())
+        resp = json.loads(_recv_line_tcp(ctrl))
+        if not resp.get("ready"):
+            ctrl.close()
+            return 0.0, 0.0
+
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        def _send_udp() -> None:
+            tokens = 0.0
+            last   = time.monotonic()
+            seq    = 0
+            end_t  = time.monotonic() + duration
+            while time.monotonic() < end_t and not stop.is_set():
+                now    = time.monotonic()
+                tokens += (now - last) * bps
+                last   = now
+                if tokens >= chunk:
+                    ts  = int(time.monotonic() * 1_000_000)
+                    hdr = _UDP_HDR.pack(_UDP_MAGIC, sid, seq, ts)
+                    try:
+                        udp.sendto(hdr + payload, (target, TRAFFIC_UDP_PORT))
+                    except OSError:
+                        break
+                    tokens -= chunk
+                    seq    += 1
+                else:
+                    time.sleep(max(0.0, (chunk - tokens) / bps * 0.8))
+
+        def _recv_udp() -> None:
+            udp.settimeout(1.0)
+            while not stop.is_set():
+                try:
+                    udp.recvfrom(4096)
+                except socket.timeout:
+                    pass
+                except OSError:
+                    break
+
+        t_send = threading.Thread(target=_send_udp, daemon=True)
+        t_recv = threading.Thread(target=_recv_udp, daemon=True)
+        t_send.start()
+        t_recv.start()
+
+        time.sleep(duration + 1.5)
+        stop.set()
+        t_send.join(timeout=3)
+        t_recv.join(timeout=3)
+        udp.close()
+
+        result = json.loads(_recv_line_tcp(ctrl, timeout=15))
+        ctrl.close()
+        return result.get("throughput_mbps", 0.0), 0.0
+
+    except Exception:
+        try:
+            ctrl.close()
+        except Exception:
+            pass
+        return 0.0, 0.0
 
 # =============================================================================
 # EXÉCUTEUR D'UN ÉVÉNEMENT (lancé dans un thread)
@@ -377,13 +479,12 @@ def _run_event(
     cert: str,
     results: list,
     lock: threading.Lock,
-    vm_id: int = 0,
 ) -> None:
     """
     Exécute un événement du planning :
     1. Attend delay_s (staggering)
     2. Effectue un handshake TLS → PQC exercé à ce moment précis
-    3. Lance le trafic correspondant
+    3. Lance le trafic via traffic_server.py
     4. Enregistre les métriques
     """
     etype    = event["type"]
@@ -399,7 +500,7 @@ def _run_event(
     hs_ms = measure_handshake_once(target, port_tls, mode, cert)
 
     # --- 3. Trafic ---
-    throughput_mbps, retransmit_pct = _run_iperf(target, etype, dur_s, vm_id=vm_id)
+    throughput_mbps, retransmit_pct = _run_traffic(target, etype, dur_s)
     actual_duration = round(time.time() - actual_start, 1)
 
     # --- 4. Enregistrement ---
@@ -413,7 +514,6 @@ def _run_event(
             "throughput_mbps":  throughput_mbps,
             "retransmit_pct":   retransmit_pct,
         })
-        # Log en temps réel pour suivre l'avancement du test
         status = "OK" if hs_ms >= 0 else "ERR"
         print(
             f"  [{status}] t+{delay_s:5.1f}s  {etype:<7}  "
@@ -431,7 +531,6 @@ def run_schedule(
     port_tls: int,
     mode: str,
     cert: str,
-    vm_id: int = 0,
 ) -> list[dict]:
     """
     Démarre tous les événements en parallèle via des threads.
@@ -445,7 +544,7 @@ def run_schedule(
     for event in schedule:
         t = threading.Thread(
             target=_run_event,
-            args=(event, target, port_tls, mode, cert, results, lock, vm_id),
+            args=(event, target, port_tls, mode, cert, results, lock),
             daemon=True,
         )
         threads.append(t)
@@ -463,7 +562,7 @@ def run_schedule(
 # =============================================================================
 # MODE CONTINU ALÉATOIRE
 # Chaque type de trafic a son propre thread-scheduler qui boucle indéfiniment.
-# Chaque itération : délai aléatoire → handshake TLS → iperf3 → pause → repeat.
+# Chaque itération : délai aléatoire → handshake TLS → traffic_server → pause → repeat.
 # S'arrête après `duration` secondes (0 = jusqu'au Ctrl+C).
 # =============================================================================
 
@@ -474,13 +573,12 @@ def run_continuous(
     cert: str,
     duration: int = 0,
     output_file: str = "",
-    vm_id: int = 0,
 ) -> list[dict]:
     """
     Lance 5 threads-scheduleurs (un par type de trafic) en boucle continue.
     Chaque scheduler :
       1. Délai initial aléatoire (staggering au démarrage)
-      2. Boucle : handshake TLS + iperf3 + pause aléatoire + recommence
+      2. Boucle : handshake TLS + traffic_server + pause aléatoire + recommence
     Le résultat est une liste d'événements enregistrés au fil du temps.
     """
     end_time       = time.time() + duration if duration > 0 else float("inf")
@@ -500,8 +598,7 @@ def run_continuous(
         """
         Thread dédié à un type de trafic.
         Génère des connexions en boucle avec des paramètres aléatoires.
-        Garantit qu'une seule connexion de ce type est active à la fois
-        (évite les conflits de port iperf3).
+        Génère des connexions séquentielles (l'une après l'autre) avec pause réaliste entre elles.
         """
         labels  = _RANDOM_LABELS[etype]
         count   = 0
@@ -525,8 +622,8 @@ def run_continuous(
             if stop_event.is_set():
                 break
 
-            # ── Trafic iperf3 ──
-            throughput_mbps, retransmit_pct = _run_iperf(target, etype, dur, vm_id=vm_id)
+            # ── Trafic traffic_server.py ──
+            throughput_mbps, retransmit_pct = _run_traffic(target, etype, dur)
             actual_dur = round(time.time() - t_event_start, 1)
             offset     = round(t_event_start - t_global_start, 1)
 
@@ -560,7 +657,7 @@ def run_continuous(
     # Démarrage de tous les schedulers
     schedulers = [
         threading.Thread(target=scheduler, args=(etype,), daemon=True)
-        for etype in IPERF_PORT
+        for etype in TRAFFIC_TYPES
     ]
     for t in schedulers:
         t.start()
@@ -580,7 +677,7 @@ def run_continuous(
 
     print("\nArrêt — attente fin des connexions en cours...")
     for t in schedulers:
-        t.join(timeout=90)   # laisse le temps à iperf3 de terminer proprement
+        t.join(timeout=90)
 
     # Restaure les handlers de signaux originaux
     signal.signal(signal.SIGINT,  _prev_sigint)
@@ -645,12 +742,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     # Exécution
     t_global = time.time()
     results  = run_schedule(
-        schedule    = schedule,
-        target      = args.target,
-        port_tls    = args.port_tls,
-        mode        = args.mode,
-        cert        = args.cert,
-        vm_id       = args.vm_id,
+        schedule  = schedule,
+        target    = args.target,
+        port_tls  = args.port_tls,
+        mode      = args.mode,
+        cert      = args.cert,
     )
     elapsed = round(time.time() - t_global, 1)
 
@@ -703,7 +799,7 @@ def main() -> None:
     run_p.add_argument("--output",   required=True,
                        help="Fichier JSON de sortie des résultats")
     run_p.add_argument("--vm-id",   type=int, default=0, dest="vm_id",
-                       help="ID unique de cette VM (1-10) — détermine le port voip dédié (5200+id)")
+                       help="(conservé pour compatibilité, non utilisé avec traffic_server)")
 
     # --- continuous ---
     cont_p = sub.add_parser(
@@ -722,7 +818,7 @@ def main() -> None:
     cont_p.add_argument("--output",   default="",
                         help="Fichier JSON de sortie (optionnel)")
     cont_p.add_argument("--vm-id",   type=int, default=0, dest="vm_id",
-                        help="ID unique de cette VM (1-10) — détermine le port voip dédié (5200+id)")
+                        help="(conservé pour compatibilité, non utilisé avec traffic_server)")
 
     args = parser.parse_args()
 
@@ -738,7 +834,6 @@ def main() -> None:
             cert        = args.cert,
             duration    = args.duration,
             output_file = args.output,
-            vm_id       = args.vm_id,
         )
 
 

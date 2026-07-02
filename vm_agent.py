@@ -218,7 +218,6 @@ class VMAgent:
         # — Outils —
         TOOLS = [
             ("openssl", True,  "TLS impossible sans openssl"),
-            ("iperf3",  False, "métriques débit/jitter indisponibles"),
             ("ping",    False, "métriques latence indisponibles"),
             ("tshark",  False, "capture paquets indisponible"),
             ("python3", False, "calculs de stats limités"),
@@ -290,20 +289,13 @@ class VMAgent:
             _fail("réseau:tls-8443",
                   f"{target}:8443 inaccessible — serveur démarré ? (pqc_bench.sh --server)")
 
-        # Ports iperf3 (5201-5210) — TCP control channel
-        iperf3_found = None
-        for port in range(5201, 5211):
-            try:
-                with socket.create_connection((target, port), timeout=1):
-                    iperf3_found = port
-                    break
-            except OSError:
-                continue
-        if iperf3_found:
-            _ok("réseau:iperf3", f"{target}:{iperf3_found} accessible (pool 5201-5210)")
-        else:
-            _warn("réseau:iperf3",
-                  f"aucun port iperf3 (5201-5210) accessible sur {target} — métriques débit/jitter manquantes")
+        # Port traffic_server.py — TCP 5300
+        try:
+            with socket.create_connection((target, 5300), timeout=2):
+                _ok("réseau:traffic", f"{target}:5300 accessible (traffic_server)")
+        except OSError:
+            _warn("réseau:traffic",
+                  f"{target}:5300 inaccessible — traffic_server.py démarré sur le serveur ?")
 
         return {"ok": True, "checks": checks}
 

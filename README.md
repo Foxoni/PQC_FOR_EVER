@@ -25,7 +25,7 @@ Ce projet le mesure.
 Le banc de test repose sur deux roles :
 
 - **Serveur WAN** : simule un serveur internet distant avec latence artificielle (tc-netem).
-  Lance `pqc_bench.sh --server` pour accepter les connexions TLS et iperf3,
+  Lance `pqc_bench.sh --server` pour accepter les connexions TLS et le trafic (traffic_server.py),
   et `server_cli.py` pour orchestrer les VMs clientes depuis un CLI interactif.
 
 - **VMs clientes** : chaque VM execute `vm_agent.py` (daemon TCP port 9998) qui attend les
@@ -47,7 +47,7 @@ pqc_bench/
 | Fichier | Role |
 | --- | --- |
 | `pqc_bench.sh` | Moteur d'execution : certificats, handshake TLS, orchestration trafic, ecriture CSV |
-| `traffic_gen.py` | Stats (min/avg/max/p99), monitoring CPU/RAM psutil, parsing JSON iperf3, fusion CSV |
+| `traffic_gen.py` | Stats (min/avg/max/p99), monitoring CPU/RAM psutil, parsing JSON traffic_server, clients trafic individuels, fusion CSV |
 | `traffic_presets.py` | 5 presets PME predefinis + mode aleatoire continu, handshake TLS par connexion |
 | `vm_agent.py` | Daemon TCP sur chaque VM cliente : recoit les ordres du serveur, lance pqc_bench.sh |
 | `server_cli.py` | CLI interactif sur le serveur WAN : scan, configuration, lancement synchronise, collecte |
@@ -62,7 +62,7 @@ Paquets obligatoires :
 
 ```bash
 sudo apt install -y \
-    nmap iperf3 tcpdump \
+    nmap tcpdump \
     openssl python3 python3-pip curl \
     cmake gcc g++ libtool libssl-dev pkg-config \
     iproute2 net-tools bc netcat-openbsd git
@@ -378,7 +378,7 @@ sudo ./pqc_bench.sh --server --mode hybrid-full --wan-profile eu
 
 Le serveur lance :
 
-- Un pool de 10 instances iperf3 (ports 5201-5210, une instance dediee par port)
+- Un serveur de trafic custom `traffic_server.py` (TCP :5300, UDP :5301) — multi-client, zero contention
 - Un serveur TLS en boucle (port 8443) avec le bon mode cryptographique
 - La simulation de latence WAN via `tc-netem`
 
@@ -563,14 +563,13 @@ SERVEUR WAN                                        VMs CLIENTES
 
 | Port | Protocole | Usage |
 | --- | --- | --- |
-| 5201-5210 | TCP+UDP | iperf3 - pool serveur (10 instances independantes, une par port) |
+| 5300 | TCP | traffic\_server.py — trafic file/stream/web/msg/voip (controle multi-client) |
+| 5301 | UDP | traffic\_server.py — trafic voip et jitter (donnees bidirectionnelles) |
 
-> **Attribution des ports iperf3 :** logique hybride pour eviter toute contention.
-> file=5201, stream=5203, web=5204, msg=5205 : ports fixes par type (isolation intra-VM).
-> voip=5200+vm\_id (ex. VM#3→5203, VM#4→5204) : port dedie par VM pour les sessions longues
-> comme les presets 3+4 (reunion synchronisee) ; fallback 5202 si vm\_id=0.
-> Ports 5206-5210 : mesure jitter UDP (rotation par IP cliente).
-> La contention inter-VMs residuelle sur les autres types est geree par retry (3 × 3 s).
+> **traffic\_server.py** remplace le pool de 10 instances iperf3. Un seul processus accepte N connexions
+> simultanees sans contention de port. Chaque type de trafic (file, stream, web, msg, voip) est
+> demande via un header JSON sur la connexion TCP. La session voip utilise en plus le canal UDP 5301
+> pour le flux bidirectionnel ; le jitter est mesure cote serveur selon RFC 3550.
 
 | 8443 | TCP/TLS | Serveur TLS (handshake PQC) |
 | 9998 | TCP | vm_agent - controle par server_cli.py |
@@ -586,14 +585,14 @@ SERVEUR WAN                                        VMs CLIENTES
 | `sudo: 'pqc_bench.sh': command not found` | Utiliser `sudo ./pqc_bench.sh` (le `./` est obligatoire) |
 | `oqsprovider not found` apres `--install` | Relancer `sudo ./pqc_bench.sh --install` |
 | `openssl list -providers` ne montre pas `oqsprovider` malgre une installation reussie | Le `.so` a ete installe dans un repertoire different de celui ecrit dans `openssl.cnf` (comportement cmake sur Ubuntu 24+/26+). Verifier avec `find /usr -name "oqsprovider.so"` puis corriger avec `sudo ln -s <chemin_reel> /usr/local/lib/ossl-modules/oqsprovider.so` (creer le dossier si necessaire : `sudo mkdir -p /usr/local/lib/ossl-modules`). Ce bug est corrige dans la version actuelle de `--install` qui detecte le chemin dynamiquement. |
-| `iperf3: connect failed` | Verifier que le serveur tourne et les ports 5201-5210 sont ouverts |
-| Debit nul sur certaines VMs (`0.0 Mbps`) malgre le serveur actif | Verifier que `iperf3 -s` tourne sur le serveur (port 5201-5205). Si plusieurs VMs lancent simultanement le meme type de trafic, le retry automatique (3 tentatives × 3 s) gere la contention — augmenter `--duration` si le test est trop court. |
+| Connexion refusee sur port 5300 | Verifier que `traffic_server.py` tourne sur le serveur (lance automatiquement par `--server`) |
+| Debit nul sur certaines VMs (`0.0 Mbps`) malgre le serveur actif | Verifier que `traffic_server.py` est en cours d'execution sur le serveur. Avec le nouveau systeme il n'y a plus de contention de port — plusieurs VMs peuvent se connecter simultanement. |
 | `openssl s_client: handshake failure` | Le mode du client et du serveur doivent correspondre |
 | `tc: command not found` | Installer `iproute2` ; sans tc la simulation WAN est desactivee |
 | Resultats trop variables | Augmenter `--hs-count 200` et `--duration 120` |
 | `date +%s%3N` ne fonctionne pas | Verifier GNU date (`apt install coreutils`) |
-| Conflits de port iperf3 | Verifier qu'aucune autre instance ne tourne (`pkill iperf3`) |
-| Le serveur boucle apres Ctrl+C + relance | `sudo pkill -f "openssl s_server"; sudo pkill -f "iperf3 -s"` |
+| Instance traffic_server residuelle | `pkill -f "traffic_server.py"` |
+| Le serveur boucle apres Ctrl+C + relance | `sudo pkill -f "openssl s_server"; sudo pkill -f "traffic_server.py"` |
 | `scan` ne trouve aucun agent | Verifier que `python3 vm_agent.py` tourne sur les VMs et que le port 9998 est ouvert |
 | VM bloquee en etat `armed` | Utiliser `reset <ip>` puis reconfigurer |
 | `results` retourne "aucun fichier" | Le test n'est peut-etre pas termine (`status` pour verifier) |
@@ -611,7 +610,7 @@ SERVEUR WAN                                        VMs CLIENTES
 | `launch` abandonne avec `[ABORT]` | Le pre-flight a detecte des erreurs bloquantes — lire les lignes FAIL et corriger, ou utiliser `launch --force` pour forcer quand meme |
 | `preflight` signale `oqs-provider absent` | Relancer `sudo ./pqc_bench.sh --install` ou verifier `/etc/ssl/openssl.cnf` |
 | `preflight` signale `tls-8443 inaccessible` | Le serveur n'est pas demarre — lancer `sudo ./pqc_bench.sh --server --mode MODE` |
-| `preflight` signale `iperf3 ports inaccessibles` | Le pool iperf3 n'est pas lance — le serveur demarre automatiquement les ports 5201-5210 |
+| `preflight` signale `traffic :5300 inaccessible` | `traffic_server.py` n'est pas lance — le serveur le demarre automatiquement via `--server` |
 
 ### Permissions apres git clone / git pull
 

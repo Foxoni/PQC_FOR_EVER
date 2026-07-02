@@ -2,29 +2,36 @@
 """
 traffic_gen.py — Module Python pour pqc_bench.sh
 Sous-commandes :
-  monitor  <outfile>                  Enregistre CPU/RAM toutes les 500ms
-  avgres   <monitor.csv>              Calcule moyennes CPU/RAM
-  stats    <timing.txt>               Calcule min/avg/max/p99 (ms)
-  parse_iperf <result.json>           Extrait débit et retransmissions iperf3
-  msg      <target> <port> <dur> <out> Envoie petits paquets irréguliers (scapy)
-  aggregate <out.csv> <in1.csv> ...   Fusionne plusieurs CSV en un seul
+  monitor      <outfile>                   Enregistre CPU/RAM toutes les 500ms
+  avgres       <monitor.csv>               Calcule moyennes CPU/RAM
+  stats        <timing.txt>                Calcule min/avg/max/p99 (ms)
+  parse_traffic <result.json>              Extrait debit depuis JSON traffic_server
+  client       <type> <target> <dur> <out> Client trafic TCP vers traffic_server
+  jitter       <target> <dur> <out>        Mesure jitter UDP via traffic_server
+  aggregate    <out.csv> <in1.csv> ...     Fusionne plusieurs CSV en un seul
 """
 
-import sys
-import os
-import json
 import csv
-import time
+import json
+import os
+import random
 import signal
 import socket
-import random
+import struct
+import sys
+import threading
+import time
 import statistics
+
+# Ports traffic_server.py
+_TCP_PORT = 5300
+_UDP_PORT = 5301
+_HDR      = struct.Struct("!IIIQ")    # magic(4)+sid(4)+seq(4)+ts_us(8)
+_MAGIC    = 0xBEEFCAFE
 
 
 # =============================================================================
 # SOUS-COMMANDE : monitor
-# Échantillonne CPU et RAM toutes les ~500ms jusqu'au SIGTERM/SIGINT.
-# Appelé en background par pqc_bench.sh, tué par stop_monitor().
 # =============================================================================
 def cmd_monitor(outfile: str) -> None:
     try:
@@ -50,7 +57,6 @@ def cmd_monitor(outfile: str) -> None:
 
 # =============================================================================
 # SOUS-COMMANDE : avgres
-# Lit le CSV produit par monitor et imprime "cpu_avg ram_avg" sur stdout.
 # =============================================================================
 def cmd_avgres(monitor_csv: str) -> None:
     rows = list(csv.DictReader(open(monitor_csv)))
@@ -68,8 +74,6 @@ def cmd_avgres(monitor_csv: str) -> None:
 
 # =============================================================================
 # SOUS-COMMANDE : stats
-# Lit une liste de valeurs entières (une par ligne) et imprime
-# "min avg max p99" sur stdout. Utilisé pour les temps de handshake.
 # =============================================================================
 def cmd_stats(timing_file: str) -> None:
     try:
@@ -83,99 +87,294 @@ def cmd_stats(timing_file: str) -> None:
         return
 
     vals.sort()
-    n = len(vals)
+    n      = len(vals)
     p99_idx = max(0, int(n * 0.99) - 1)
 
-    vmin = vals[0]
-    vavg = round(statistics.mean(vals))
-    vmax = vals[-1]
-    vp99 = vals[p99_idx]
-
-    print(f"{vmin} {vavg} {vmax} {vp99}")
+    print(f"{vals[0]} {round(statistics.mean(vals))} {vals[-1]} {vals[p99_idx]}")
 
 
 # =============================================================================
-# SOUS-COMMANDE : parse_iperf
-# Lit le JSON produit par iperf3 et imprime "throughput_mbps retransmit_pct".
-# Gère les formats TCP et UDP, et le mode --bidir (VoIP).
+# SOUS-COMMANDE : parse_traffic
+# Lit le JSON produit par traffic_server.py et imprime "throughput_mbps 0.0".
+# Conserve aussi parse_iperf comme alias pour compatibilite avec l'ancien code.
 # =============================================================================
-def cmd_parse_iperf(result_file: str) -> None:
+def cmd_parse_traffic(result_file: str) -> None:
     try:
         data = json.load(open(result_file))
     except (FileNotFoundError, json.JSONDecodeError):
         print("0 0")
         return
 
-    end = data.get("end", {})
+    if "error" in data and data.get("throughput_mbps", 0.0) == 0.0:
+        print("0 0")
+        return
 
-    # Débit : somme reçue (TCP) ou envoyée (UDP)
-    throughput_bps = 0.0
-    for key in ("sum_received", "sum_sent", "sum"):
-        if key in end:
-            throughput_bps = end[key].get("bits_per_second", 0.0)
+    mbps = round(float(data.get("throughput_mbps", 0.0)), 3)
+    print(f"{mbps} 0.0")
+
+
+# =============================================================================
+# HELPERS CLIENT TCP
+# =============================================================================
+
+def _recv_line(sock: socket.socket, timeout: float = 15.0) -> str:
+    sock.settimeout(timeout)
+    buf = b""
+    while b"\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
             break
-    # Mode bidir : deux flux, on prend le total
-    if "sum_bidir_reverse" in end:
-        rev = end["sum_bidir_reverse"].get("bits_per_second", 0.0)
-        throughput_bps = max(throughput_bps, rev)
+        buf += chunk
+    return buf.split(b"\n")[0].decode(errors="replace")
 
-    throughput_mbps = round(throughput_bps / 1e6, 2)
 
-    # Retransmissions TCP — sum_sent n'a pas de champ "packets" pour TCP (c'est UDP qui l'a).
-    # On estime le nombre de segments utiles depuis les octets transférés (MSS typique 1460).
-    sent        = end.get("sum_sent", {})
-    retrans     = sent.get("retransmits", 0) or 0
-    bytes_sent  = sent.get("bytes", 0) or 0
-    useful_segs = bytes_sent / 1460
-    total_segs  = useful_segs + retrans
-    retransmit_pct = round(retrans / total_segs * 100, 3) if total_segs > 0 else 0.0
-
-    print(f"{throughput_mbps} {retransmit_pct}")
+def _tcp_upload(sock: socket.socket, duration: float, bps: float | None,
+                chunk_size: int) -> None:
+    payload = bytes(chunk_size)
+    end     = time.monotonic() + duration
+    if bps is None:
+        while time.monotonic() < end:
+            try:
+                sock.sendall(payload)
+            except OSError:
+                break
+    else:
+        bytes_per_s = bps / 8
+        tokens = 0.0
+        last   = time.monotonic()
+        while time.monotonic() < end:
+            now    = time.monotonic()
+            tokens += (now - last) * bytes_per_s
+            last   = now
+            if tokens >= chunk_size:
+                try:
+                    sock.sendall(payload)
+                    tokens -= chunk_size
+                except OSError:
+                    break
+            else:
+                time.sleep(max(0.0, (chunk_size - tokens) / bytes_per_s * 0.8))
 
 
 # =============================================================================
-# SOUS-COMMANDE : msg
-# Simule du trafic messagerie : petits paquets TCP de taille variable,
-# envoyés à intervalles irréguliers (profil chat / email).
-# N'utilise PAS Scapy pour éviter les droits root côté client.
+# SOUS-COMMANDE : client
+# Client trafic TCP vers traffic_server.py. Ecrit JSON resultat dans outfile.
+# Types : file, stream, web, msg, voip
 # =============================================================================
-def cmd_msg(target: str, port: int, duration: int, outfile: str) -> None:
-    end_time = time.time() + duration
-    packets_sent = 0
-    errors = 0
+def cmd_client(etype: str, target: str, duration: int, outfile: str) -> None:
+    if etype == "voip":
+        result = _client_voip(target, duration)
+    else:
+        result = _client_tcp(etype, target, duration)
+    with open(outfile, "w") as f:
+        json.dump(result, f)
 
-    while time.time() < end_time:
-        # Taille variable : 50–800 octets (email court à pièce jointe légère)
-        size = random.randint(50, 800)
-        # Délai irrégulier : 0.05s (burst) à 2.0s (long silence)
-        delay = random.choices(
-            [random.uniform(0.05, 0.3), random.uniform(0.5, 2.0)],
-            weights=[0.7, 0.3],
-        )[0]
 
+def _client_tcp(etype: str, target: str, duration: int) -> dict:
+    BPS    = {"web": 2_000_000, "msg": 200_000}
+    CHUNKS = {"file": 65536, "stream": 65536, "web": 512, "msg": 150}
+
+    bps        = BPS.get(etype)
+    chunk_size = CHUNKS.get(etype, 4096)
+    upload     = (etype != "stream")
+
+    for attempt in range(3):
         try:
-            with socket.create_connection((target, port), timeout=2.0) as s:
-                s.sendall(os.urandom(size))
-            packets_sent += 1
-        except OSError:
-            errors += 1
+            with socket.create_connection((target, _TCP_PORT), timeout=10) as sock:
+                sock.sendall((json.dumps({"type": etype, "duration": duration}) + "\n").encode())
+                resp = json.loads(_recv_line(sock))
+                if not resp.get("ready"):
+                    return {"throughput_mbps": 0.0, "error": "not ready"}
 
-        time.sleep(delay)
+                if upload:
+                    _tcp_upload(sock, duration, bps, chunk_size)
+                    try:
+                        sock.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                else:
+                    sock.settimeout(2.0)
+                    try:
+                        while sock.recv(65536):
+                            pass
+                    except (socket.timeout, OSError):
+                        pass
 
-    result = {
-        "profile": "msg",
-        "packets_sent": packets_sent,
-        "errors": errors,
-        "duration_s": duration,
-    }
+                return json.loads(_recv_line(sock, timeout=duration + 30))
+        except (ConnectionRefusedError, OSError):
+            if attempt < 2:
+                time.sleep(3)
+        except Exception as e:
+            return {"throughput_mbps": 0.0, "error": str(e)}
+
+    return {"throughput_mbps": 0.0, "error": "connexion impossible apres 3 tentatives"}
+
+
+def _client_voip(target: str, duration: int) -> dict:
+    sid     = random.randint(1, 0x7FFFFFFF)
+    bps     = 30_000_000 / 8
+    chunk   = 1300
+    payload = os.urandom(chunk - _HDR.size)
+    stop    = threading.Event()
+    ctrl    = None
+    udp     = None
+
+    try:
+        ctrl = socket.create_connection((target, _TCP_PORT), timeout=10)
+        ctrl.sendall((json.dumps({"type": "voip", "duration": duration,
+                                  "session_id": sid}) + "\n").encode())
+        resp = json.loads(_recv_line(ctrl))
+        if not resp.get("ready"):
+            return {"throughput_mbps": 0.0, "error": "not ready"}
+
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        def _send() -> None:
+            tokens = 0.0
+            last   = time.monotonic()
+            seq    = 0
+            end_t  = time.monotonic() + duration
+            while time.monotonic() < end_t and not stop.is_set():
+                now    = time.monotonic()
+                tokens += (now - last) * bps
+                last   = now
+                if tokens >= chunk:
+                    ts  = int(time.monotonic() * 1_000_000)
+                    hdr = _HDR.pack(_MAGIC, sid, seq, ts)
+                    try:
+                        udp.sendto(hdr + payload, (target, _UDP_PORT))
+                    except OSError:
+                        break
+                    tokens -= chunk
+                    seq    += 1
+                else:
+                    time.sleep(max(0.0, (chunk - tokens) / bps * 0.8))
+
+        def _recv() -> None:
+            udp.settimeout(1.0)
+            while not stop.is_set():
+                try:
+                    udp.recvfrom(4096)
+                except socket.timeout:
+                    pass
+                except OSError:
+                    break
+
+        t_s = threading.Thread(target=_send, daemon=True)
+        t_r = threading.Thread(target=_recv, daemon=True)
+        t_s.start()
+        t_r.start()
+        time.sleep(duration + 1.5)
+        stop.set()
+        t_s.join(timeout=3)
+        t_r.join(timeout=3)
+
+        result = json.loads(_recv_line(ctrl, timeout=15))
+        return result
+
+    except Exception as e:
+        return {"throughput_mbps": 0.0, "error": str(e)}
+    finally:
+        stop.set()
+        if udp:
+            try:
+                udp.close()
+            except OSError:
+                pass
+        if ctrl:
+            try:
+                ctrl.close()
+            except OSError:
+                pass
+
+
+# =============================================================================
+# SOUS-COMMANDE : jitter
+# Mesure jitter UDP via traffic_server.py. Ecrit JSON dans outfile.
+# Utilise type="jitter" (1 Mbps bidir) pour ne pas saturer le lien.
+# =============================================================================
+def cmd_jitter(target: str, duration: int, outfile: str) -> None:
+    sid     = random.randint(1, 0x7FFFFFFF)
+    bps     = 1_000_000 / 8      # bytes/s
+    chunk   = 200
+    payload = os.urandom(chunk - _HDR.size)
+    stop    = threading.Event()
+    ctrl    = None
+    udp     = None
+
+    try:
+        ctrl = socket.create_connection((target, _TCP_PORT), timeout=10)
+        ctrl.sendall((json.dumps({"type": "jitter", "duration": duration,
+                                  "session_id": sid}) + "\n").encode())
+        resp = json.loads(_recv_line(ctrl))
+        if not resp.get("ready"):
+            raise RuntimeError("server not ready")
+
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        def _send() -> None:
+            tokens = 0.0
+            last   = time.monotonic()
+            seq    = 0
+            end_t  = time.monotonic() + duration
+            while time.monotonic() < end_t and not stop.is_set():
+                now    = time.monotonic()
+                tokens += (now - last) * bps
+                last   = now
+                if tokens >= chunk:
+                    ts  = int(time.monotonic() * 1_000_000)
+                    hdr = _HDR.pack(_MAGIC, sid, seq, ts)
+                    try:
+                        udp.sendto(hdr + payload, (target, _UDP_PORT))
+                    except OSError:
+                        break
+                    tokens -= chunk
+                    seq    += 1
+                else:
+                    time.sleep(max(0.0, (chunk - tokens) / bps * 0.8))
+
+        def _recv() -> None:
+            udp.settimeout(1.0)
+            while not stop.is_set():
+                try:
+                    udp.recvfrom(4096)
+                except socket.timeout:
+                    pass
+                except OSError:
+                    break
+
+        t_s = threading.Thread(target=_send, daemon=True)
+        t_r = threading.Thread(target=_recv, daemon=True)
+        t_s.start()
+        t_r.start()
+        time.sleep(duration + 1.5)
+        stop.set()
+        t_s.join(timeout=3)
+        t_r.join(timeout=3)
+
+        result = json.loads(_recv_line(ctrl, timeout=15))
+
+    except Exception as e:
+        result = {"jitter_ms": -1, "lost_pct": -1, "throughput_mbps": 0.0, "error": str(e)}
+    finally:
+        stop.set()
+        if udp:
+            try:
+                udp.close()
+            except OSError:
+                pass
+        if ctrl:
+            try:
+                ctrl.close()
+            except OSError:
+                pass
+
     with open(outfile, "w") as f:
         json.dump(result, f)
 
 
 # =============================================================================
 # SOUS-COMMANDE : aggregate
-# Fusionne plusieurs fichiers CSV (même schéma) en un seul,
-# en ne gardant l'en-tête que du premier fichier.
 # =============================================================================
 def cmd_aggregate(outfile: str, *input_files: str) -> None:
     valid = [f for f in input_files if os.path.isfile(f)]
@@ -216,11 +415,17 @@ def main() -> None:
     elif subcmd == "stats" and len(sys.argv) == 3:
         cmd_stats(sys.argv[2])
 
-    elif subcmd == "parse_iperf" and len(sys.argv) == 3:
-        cmd_parse_iperf(sys.argv[2])
+    elif subcmd in ("parse_traffic", "parse_iperf") and len(sys.argv) == 3:
+        # parse_iperf conservé comme alias pour compatibilité
+        cmd_parse_traffic(sys.argv[2])
 
-    elif subcmd == "msg" and len(sys.argv) == 6:
-        cmd_msg(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5])
+    elif subcmd == "client" and len(sys.argv) == 6:
+        # client <type> <target> <duration> <outfile>
+        cmd_client(sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5])
+
+    elif subcmd == "jitter" and len(sys.argv) == 5:
+        # jitter <target> <duration> <outfile>
+        cmd_jitter(sys.argv[2], int(sys.argv[3]), sys.argv[4])
 
     elif subcmd == "aggregate" and len(sys.argv) >= 4:
         cmd_aggregate(sys.argv[2], *sys.argv[3:])
