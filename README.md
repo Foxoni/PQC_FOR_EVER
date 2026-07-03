@@ -438,6 +438,23 @@ dans Grafana ou de comparer plusieurs runs cote a cote.
 
 Disponibles apres `docker compose up -d` sur `http://<serveur>:3000` (admin / pqcadmin) :
 
+**PQC Bench — Statut Flotte** (`pqc-status-01`) — a ouvrir avant chaque test
+
+- Rafraichissement automatique toutes les 10s
+- Voyants par VM (un tile par hostname) colores par etat :
+
+| Couleur | Etat | Signification |
+| --- | --- | --- |
+| Rouge `⚠ hors ligne` | aucun heartbeat recus | vm_agent.py ne tourne pas ou ne peut pas joindre InfluxDB |
+| Gris `idle` | connecte, pas encore configure | `set` non encore lance |
+| Jaune `configuree` | configure, pas encore arme | `arm` non encore lance |
+| **Vert `✓ armee`** | **pret a lancer** | **tout est OK — `launch` peut etre execute** |
+| Vert `⏳ en cours` | test en cours | — |
+| Bleu `terminee` | test fini | — |
+
+- Compteurs en haut : VMs connectees / armees / configurees / en cours
+- Tableau de detail : hostname, ID, etat textuel, derniere vue
+
 **PQC Bench — Live** (`pqc-live-01`)
 
 - Filtre par `run_id` (liste deroulante auto-alimentee)
@@ -448,6 +465,21 @@ Disponibles apres `docker compose up -d` sur `http://<serveur>:3000` (admin / pq
 
 - Bar charts par `run_id` sur 7 jours glissants
 - Handshake moyen/P99, TTFB, debit par profil, retransmissions, jitter, packet loss, CPU serveur
+
+### Verification avant lancement
+
+```text
+1. Ouvrir "PQC Bench — Statut Flotte" dans Grafana
+2. Verifier que toutes les VMs attendues apparaissent (rouge = pb de connexion InfluxDB)
+3. Lancer : set all --preset N  →  arm all
+4. Dans les 10s, les voyants doivent passer au VERT
+5. Lancer : launch
+```
+
+Si une VM reste rouge apres le demarrage de vm_agent.py :
+
+- Verifier que `INFLUX_URL` et `INFLUX_TOKEN` sont exports sur la VM
+- Tester manuellement : `curl -sf $INFLUX_URL/health` doit repondre `{"status":"pass",...}`
 
 ### Configuration en production
 

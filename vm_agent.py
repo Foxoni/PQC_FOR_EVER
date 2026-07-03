@@ -17,6 +17,8 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 PORT       = 9998
@@ -24,6 +26,46 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 BENCH      = SCRIPT_DIR / "pqc_bench.sh"
 RESULTS    = SCRIPT_DIR / "results"
 LOG_TAIL   = 20   # nombre de lignes retournees par STATUS et GET_LOGS
+
+_HOSTNAME  = socket.gethostname()
+
+# Mapping etat textuel → code numerique pour les seuils de couleur Grafana
+_STATE_CODE = {"idle": 0, "configured": 1, "armed": 2, "running": 3, "done": 4}
+
+
+def _heartbeat_loop(agent: "VMAgent") -> None:
+    """Pousse l'etat courant de l'agent vers InfluxDB toutes les 10s.
+    Silencieux si INFLUX_URL n'est pas defini dans l'environnement."""
+    while True:
+        time.sleep(10)
+        url = os.environ.get("INFLUX_URL", "")
+        if not url:
+            continue
+
+        tok = os.environ.get("INFLUX_TOKEN", "")
+        org = os.environ.get("INFLUX_ORG",    "pqc")
+        bkt = os.environ.get("INFLUX_BUCKET", "pqc_bench")
+
+        with agent._lock:
+            state  = agent.state
+            vm_id  = str(agent.assigned_id) if agent.assigned_id is not None else "none"
+
+        code = _STATE_CODE.get(state, -1)
+        line = (
+            f'vm_heartbeat,host={_HOSTNAME},vm_id={vm_id} '
+            f'state="{state}",state_code={code}i '
+            f'{int(time.time())}'
+        )
+        try:
+            req = urllib.request.Request(
+                f"{url}/api/v2/write?org={org}&bucket={bkt}&precision=s",
+                data=line.encode(),
+                headers={"Authorization": f"Token {tok}", "Content-Type": "text/plain"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=3)
+        except (urllib.error.URLError, OSError):
+            pass
 
 
 class VMAgent:
@@ -373,6 +415,8 @@ def main():
         sys.exit(1)
 
     agent = VMAgent()
+    threading.Thread(target=_heartbeat_loop, args=(agent,), daemon=True, name="influx-hb").start()
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
