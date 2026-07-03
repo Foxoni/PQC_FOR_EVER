@@ -24,10 +24,13 @@ import json
 import socket
 import csv
 import io
+import os
 import time
 import statistics
 import threading
 import ipaddress
+import urllib.request
+import urllib.error
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -40,6 +43,28 @@ SCAN_TIMEOUT     = 0.5
 SERVER_MODE_FILE = Path(__file__).resolve().parent / ".server_mode"
 
 
+_INFLUX_URL   = os.environ.get("INFLUX_URL",    "")
+_INFLUX_ORG   = os.environ.get("INFLUX_ORG",    "pqc")
+_INFLUX_BUCKET= os.environ.get("INFLUX_BUCKET", "pqc_bench")
+_INFLUX_TOKEN = os.environ.get("INFLUX_TOKEN",  "pqc-bench-token-changeme")
+
+
+def _influx_push(line: str, run_id: str) -> None:
+    """Pousse une ligne InfluxDB line protocol. Silencieux si non configuré."""
+    if not _INFLUX_URL or not run_id:
+        return
+    try:
+        req = urllib.request.Request(
+            f"{_INFLUX_URL}/api/v2/write?org={_INFLUX_ORG}&bucket={_INFLUX_BUCKET}&precision=s",
+            data=line.encode(),
+            headers={"Authorization": f"Token {_INFLUX_TOKEN}", "Content-Type": "text/plain"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=2)
+    except (urllib.error.URLError, OSError):
+        pass
+
+
 class _SrvMonitor:
     """Collecte CPU/RAM/réseau pendant la durée exacte d'un test (launch → results)."""
 
@@ -48,9 +73,11 @@ class _SrvMonitor:
         self._stop    = threading.Event()
         self._samples = []   # (cpu_pct, ram_mb, rx_bytes_cumul, timestamp)
         self._iface   = ""
+        self._run_id  = ""
 
-    def start(self, iface: str = "") -> None:
+    def start(self, iface: str = "", run_id: str = "") -> None:
         self._iface   = iface
+        self._run_id  = run_id
         self._samples = []
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="srv-mon")
@@ -128,6 +155,8 @@ class _SrvMonitor:
 
     def _loop(self):
         prev_total, prev_idle = self._read_cpu()
+        prev_rx   = self._read_rx()
+        prev_ts   = time.time()
 
         while not self._stop.wait(5):
             total, idle = self._read_cpu()
@@ -136,12 +165,20 @@ class _SrvMonitor:
             cpu_pct = round((1 - di / dt) * 100, 1) if dt > 0 else 0.0
             prev_total, prev_idle = total, idle
 
-            self._samples.append((
-                cpu_pct,
-                self._read_ram(),
-                self._read_rx(),
-                time.time(),
-            ))
+            ram_mb   = self._read_ram()
+            rx_bytes = self._read_rx()
+            now      = time.time()
+            elapsed  = max(now - prev_ts, 1)
+            rx_mbps  = round((rx_bytes - prev_rx) * 8 / elapsed / 1e6, 3)
+            prev_rx, prev_ts = rx_bytes, now
+
+            self._samples.append((cpu_pct, ram_mb, rx_bytes, now))
+
+            _influx_push(
+                f"server_metrics,run_id={self._run_id} "
+                f"cpu_pct={cpu_pct},ram_mb={ram_mb}i,rx_mbps={rx_mbps} {int(now)}",
+                self._run_id,
+            )
 
 
 class VM:
@@ -567,6 +604,11 @@ class ServerCLI:
         if has_fail:
             print("\n[WARN] Lancement forcé malgré des erreurs — les résultats peuvent être incomplets.")
 
+        # Dériver le mode et générer le run_id avant le lancement
+        mode   = next((self.vms[ip].config.get("mode", "unknown") for ip in armed), "unknown")
+        run_id = f"{mode}_{self._next_master_index(mode)}"
+        print(f"  Run ID: {run_id}")
+
         print(f"\nConnexion aux {len(armed)} VM(s) pour lancement synchronise...")
         results   = {}
         ready_n   = [0]
@@ -589,7 +631,7 @@ class ServerCLI:
                     if not go.wait(timeout=15):
                         results[ip] = {"ok": False, "error": "timeout go"}
                         return
-                    s.sendall((json.dumps({"cmd": "START"}) + "\n").encode())
+                    s.sendall((json.dumps({"cmd": "START", "run_id": run_id}) + "\n").encode())
                     buf = b""
                     while b"\n" not in buf:
                         chunk = s.recv(4096)
@@ -613,7 +655,7 @@ class ServerCLI:
         go.set()
         # Monitoring serveur et watcher de fin de test (en background)
         self._mon_result = {}
-        self._mon.start(iface=self._server_state().get("iface", ""))
+        self._mon.start(iface=self._server_state().get("iface", ""), run_id=run_id)
         threading.Thread(
             target=self._watch_until_done,
             args=(list(armed),),

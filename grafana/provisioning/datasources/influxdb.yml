@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB-PQC
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    jsonData:
+      version: Flux
+      organization: pqc
+      defaultBucket: pqc_bench
+      tlsSkipVerify: true
+    secureJsonData:
+      token: pqc-bench-token-changeme
+    isDefault: true
+    editable: true

@@ -1,0 +1,50 @@
+version: "3.8"
+
+# InfluxDB v2 + Grafana pour la supervision PQC Bench
+# Lancement : docker compose up -d
+# Grafana  : http://<server>:3000  (admin / pqcadmin)
+# InfluxDB : http://<server>:8086  (admin / pqcadmin123)
+#
+# Variables d'environnement à configurer sur le serveur et les VMs :
+#   INFLUX_URL=http://<server>:8086
+#   INFLUX_TOKEN=pqc-bench-token-changeme   # à changer en production
+#   INFLUX_ORG=pqc
+#   INFLUX_BUCKET=pqc_bench
+
+services:
+  influxdb:
+    image: influxdb:2.7
+    container_name: pqc_influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: pqcadmin123
+      DOCKER_INFLUXDB_INIT_ORG: pqc
+      DOCKER_INFLUXDB_INIT_BUCKET: pqc_bench
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: pqc-bench-token-changeme
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: pqc_grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: pqcadmin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - influxdb
+
+volumes:
+  influxdb_data:
+  grafana_data:

@@ -22,43 +22,95 @@ Ce projet le mesure.
 
 ## Architecture
 
-Le banc de test repose sur deux roles :
+### Topologie reseau
 
-- **Serveur WAN** : simule un serveur internet distant avec latence artificielle (tc-netem).
-  Lance `pqc_bench.sh --server` pour accepter les connexions TLS et le trafic (traffic_server.py),
-  et `server_cli.py` pour orchestrer les VMs clientes depuis un CLI interactif.
+Le banc de test utilise **trois interfaces reseau** par machine pour isoler les flux :
 
-- **VMs clientes** : chaque VM execute `vm_agent.py` (daemon TCP port 9998) qui attend les
-  ordres du serveur. Sur signal, elle lance `pqc_bench.sh` et mesure les performances vers
-  le serveur WAN.
+```text
+                    ┌─────────────────────────────────────┐
+                    │         SERVEUR WAN (Linux)          │
+                    │                                      │
+                    │  pqc_bench.sh --server               │
+                    │  traffic_server.py  (TCP:5300/UDP:5301)│
+                    │  server_cli.py (CLI orchestration)   │
+                    │  InfluxDB + Grafana (Docker)         │
+                    └──────┬───────────────────┬───────────┘
+                           │                   │
+              LAN TEST      │   LAN CONTROLE    │
+           192.168.141.x   │   192.168.142.x   │
+         (trafic benchmark) │ (ordres CLI, 9998)│
+                           │                   │
+          ┌────────────────┴───┐  ┌────────────┴────────────┐
+          │   VM 1 (cliente)   │  │   VM 2 (cliente)        │
+          │ eth1: 141.10       │  │ eth1: 141.11            │
+          │ eth2: 142.10       │  │ eth2: 142.11            │
+          │ vm_agent.py :9998  │  │ vm_agent.py :9998       │
+          │ telegraf            │  │ telegraf                │
+          └────────────────────┘  └─────────────────────────┘
+
+  NAT (internet uniquement - mises a jour, Docker pull, etc.)
+```
+
+**Principe de separation :**
+
+| Interface | Reseau | Usage |
+| --- | --- | --- |
+| NAT | internet | Acces internet uniquement (apt, Docker pull, git) |
+| Host-Only 192.168.141.x | LAN TEST | Trafic benchmark TLS + simulation WAN (tc-netem) |
+| Host-Only 192.168.142.x | LAN CONTROLE | Ordres CLI server_cli.py → vm_agent.py (port 9998) |
+
+Le trafic de controle (commandes, recup CSV) ne transite **jamais** par l'interface de test,
+ce qui garantit que la simulation WAN (tc-netem) n'impacte pas les temps de reponse du CLI.
+
+### Identification des VMs (double IP)
+
+Chaque VM ayant deux IP, le serveur les associe via un mecanisme d'identifiant :
+
+1. `scan --test 192.168.141.0/24` : decouvre les agents sur le LAN test, assigne un `ID` unique a chacun via `ASSIGN_ID`
+2. `scan --control 192.168.142.0/24` : interroge les agents via `GET_ID`, fait correspondre l'IP controle a l'ID deja connu
+3. Toutes les commandes suivantes passent par `control_ip` ; seul le trafic benchmark utilise `test_ip`
+
+Les IDs persistent tant que le daemon `vm_agent.py` tourne. Un re-scan ne reaffecte pas un ID
+deja attribue — il le recupere via `GET_ID` et verifie la coherence.
 
 ### Fichiers
 
 ```text
 pqc_bench/
-├── pqc_bench.sh          # Moteur de test - generation certificats, handshake, trafic
+├── pqc_bench.sh          # Moteur de test - generation certificats, handshake, trafic, push InfluxDB
 ├── traffic_server.py     # Serveur de trafic (TCP :5300, UDP :5301) - lance par --server
 ├── traffic_gen.py        # Module utilitaire (stats, monitoring CPU/RAM, clients trafic, CSV)
 ├── traffic_presets.py    # Generateur de trafic - presets + mode continu aleatoire
 ├── vm_agent.py           # Daemon de controle sur chaque VM cliente (port 9998)
 ├── server_cli.py         # CLI central sur le serveur - orchestre toutes les VMs
+├── docker-compose.yml    # InfluxDB v2 + Grafana pour la supervision
+├── telegraf.conf         # Template Telegraf pour les VMs (CPU/RAM/reseau → InfluxDB)
+├── grafana/
+│   └── provisioning/
+│       ├── datasources/influxdb.yml    # Datasource InfluxDB auto-configuree
+│       └── dashboards/
+│           ├── provider.yml            # Chargeur de dashboards
+│           ├── pqc_live.json           # Dashboard temps reel (par run)
+│           └── pqc_compare.json        # Comparaison multi-run
 └── results/              # Fichiers CSV produits (cree automatiquement)
 ```
 
 | Fichier | Role |
 | --- | --- |
-| `pqc_bench.sh` | Moteur d'execution : certificats, handshake TLS, orchestration trafic, ecriture CSV |
-| `traffic_server.py` | Serveur de trafic multi-client (TCP :5300 + UDP :5301) — remplace le pool iperf3, accepte N connexions simultanees sans contention |
-| `traffic_gen.py` | Stats (min/avg/max/p99), monitoring CPU/RAM psutil, clients trafic individuels (cmd client/jitter), parsing JSON, fusion CSV |
+| `pqc_bench.sh` | Moteur d'execution : certificats, handshake TLS, orchestration trafic, ecriture CSV, push InfluxDB |
+| `traffic_server.py` | Serveur de trafic multi-client (TCP :5300 + UDP :5301) — remplace le pool iperf3 |
+| `traffic_gen.py` | Stats (min/avg/max/p99), monitoring CPU/RAM, clients trafic individuels, parsing JSON |
 | `traffic_presets.py` | 5 presets PME predefinis + mode aleatoire continu, handshake TLS par connexion |
 | `vm_agent.py` | Daemon TCP sur chaque VM cliente : recoit les ordres du serveur, lance pqc_bench.sh |
-| `server_cli.py` | CLI interactif sur le serveur WAN : scan, configuration, lancement synchronise, collecte |
+| `server_cli.py` | CLI interactif sur le serveur WAN : scan dual-interface, lancement synchronise, collecte |
+| `docker-compose.yml` | Stack de supervision : InfluxDB 2.7 + Grafana 10.4, volumes persistants |
+| `telegraf.conf` | Template de collecte systeme (CPU, RAM, reseau) pour les VMs |
 
 ---
 
 ## Prerequis
 
-### Systeme (Debian / Ubuntu)
+### Systeme (Debian / Ubuntu) — toutes les machines
 
 Paquets obligatoires :
 
@@ -68,8 +120,6 @@ sudo apt install -y \
     openssl python3 python3-pip curl \
     cmake gcc g++ libtool libssl-dev pkg-config \
     iproute2 net-tools bc netcat-openbsd git
-
-pip3 install psutil
 ```
 
 Paquets optionnels (metriques reseau avancees) :
@@ -83,10 +133,7 @@ sudo apt install -y hping3 tshark fping
 | `hping3` | `TCP_connect_ms`, `Ping_p99_ms` | aucun |
 | `tshark` | `Fragmentation_pct`, `Handshake_paquets`, `Handshake_octets` | **root** (CAP_NET_RAW) |
 | `fping` | fallback si hping3 absent | aucun |
-| `curl` | `TTFB_ms` | aucun |
-
-> Si un outil est absent ou que les droits manquent, les colonnes correspondantes sont remplies
-> avec `-1` (convention "non mesure") sans faire echouer le test.
+| `curl` | `TTFB_ms`, push InfluxDB | aucun |
 
 ### OpenSSL 3.x + oqs-provider (support PQC)
 
@@ -110,11 +157,20 @@ openssl list -providers | grep oqs
 # oqsprovider doit apparaitre
 ```
 
+### Docker (serveur uniquement — pour la supervision)
+
+```bash
+# Installation Docker Engine
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER
+# Se reconnecter pour que le groupe soit pris en compte
+```
+
 ---
 
 ## Deploiement
 
-### Sur toutes les machines (serveur et clients)
+### 1. Sur toutes les machines (serveur et VMs clientes)
 
 ```bash
 git clone https://github.com/Foxoni/PQC_FOR_EVER.git
@@ -122,25 +178,60 @@ cd PQC_FOR_EVER
 sudo ./pqc_bench.sh --install
 ```
 
-### Sur le serveur WAN
+### 2. Sur le serveur WAN
+
+#### Lancer la stack de supervision (optionnel mais recommande)
 
 ```bash
-# Aide et liste des modes disponibles
-sudo ./pqc_bench.sh --server --help
+# Depuis le repertoire du projet
+docker compose up -d
 
-# Terminal 1 : lancer le serveur de trafic
-# --server-ip : optionnel, utile si la machine a plusieurs interfaces reseau
-sudo ./pqc_bench.sh --server --mode hybrid-full --wan-profile eu
-sudo ./pqc_bench.sh --server --mode hybrid-full --wan-profile eu --server-ip 192.168.x.1
-
-# Terminal 2 : lancer le CLI de controle
-python3 server_cli.py --subnet 192.168.x.0/24
+# Grafana : http://<IP_serveur>:3000  (admin / pqcadmin)
+# InfluxDB : http://<IP_serveur>:8086 (admin / pqcadmin123)
 ```
 
-### Sur chaque VM cliente
+Exporter les variables pour activer la collecte automatique :
 
 ```bash
-# Lancer le daemon de controle (reste en arriere-plan)
+export INFLUX_URL=http://localhost:8086
+export INFLUX_TOKEN=pqc-bench-token-changeme   # a changer en production
+export INFLUX_ORG=pqc
+export INFLUX_BUCKET=pqc_bench
+```
+
+> Ajouter ces exports dans `~/.bashrc` ou `/etc/environment` pour qu'ils persistent.
+
+#### Lancer le serveur de benchmark
+
+```bash
+# Terminal 1 : serveur de trafic + TLS + simulation WAN
+# --server-ip specifie l'IP du LAN TEST (obligatoire si plusieurs interfaces)
+sudo ./pqc_bench.sh --server --mode hybrid-full --wan-profile eu --server-ip 192.168.141.1
+
+# Terminal 2 : CLI de controle
+python3 server_cli.py
+```
+
+### 3. Sur chaque VM cliente
+
+#### Installer Telegraf (supervision systeme)
+
+```bash
+sudo apt install -y telegraf
+
+# Editer le template : remplacer INFLUX_URL et INFLUX_TOKEN
+sudo cp telegraf.conf /etc/telegraf/telegraf.conf
+sudo nano /etc/telegraf/telegraf.conf
+# Modifier : urls = ["http://<IP_SERVEUR>:8086"]
+#            token = "pqc-bench-token-changeme"
+
+sudo systemctl enable --now telegraf
+```
+
+#### Lancer le daemon de controle
+
+```bash
+# Reste en arriere-plan (supervisor, tmux ou screen recommande)
 python3 vm_agent.py
 ```
 
@@ -149,7 +240,6 @@ python3 vm_agent.py
 ## Controle centralise depuis le serveur
 
 `server_cli.py` est un CLI interactif qui orchestre toutes les VMs depuis le serveur.
-Les VMs doivent avoir `vm_agent.py` en cours d'execution.
 
 ```text
 PQC Bench -- Controleur central  (tapez 'help' pour l'aide)
@@ -161,25 +251,24 @@ pqc>
 
 | Commande | Description |
 | --- | --- |
-| `scan [subnet]` | Scan parallele du sous-reseau, detecte les agents et leur assigne un numero `[1]`, `[2]`... |
-| `list` | Tableau : numero, IP, etat, preset, mode, WAN, derniere vue |
-| `set <N\|ip\|all> [--preset N] [--wan-profile WAN] [--duration D]` | Configure une ou toutes les VMs par numero, IP ou `all` — mode et cible auto-detectes |
+| `scan --test <subnet> [--control <subnet>]` | Scan du LAN test (assigne les IDs), puis du LAN controle (appaire les IPs) |
+| `scan --test <subnet> --force-remove` | Supprime automatiquement les VMs disparues sans prompt |
+| `scan --test <subnet> --force-keep` | Conserve les VMs disparues en etat `unreachable` sans prompt |
+| `list` | Tableau : numero, IP TEST, IP CTRL, etat, preset, mode, WAN, derniere vue |
+| `set <N\|ip\|all> [--preset N] [--wan-profile WAN] [--duration D]` | Configure une ou toutes les VMs — mode et cible auto-detectes depuis le serveur |
 | `arm [N\|ip\|all]` | Met les VMs configurees en standby (pretes a demarrer) |
 | `preflight [N\|ip\|all]` | Verifie l'environnement de chaque VM (outils, OQS provider, droits, connectivite) |
-| `launch [--force]` | Envoie START a toutes les VMs armed **simultanement**, apres un pre-flight automatique — `--force` lance meme si des checks echouent |
+| `launch [--force]` | Envoie START a toutes les VMs armed **simultanement**, genere le `run_id`, demarre le monitoring |
 | `status [N\|ip\|all]` | Poll l'etat + 5 dernieres lignes de log + code de retour |
-| `logs [N\|ip\|all] [--lines N]` | Affiche le log complet de pqc_bench.sh sur la VM (defaut 50 lignes) |
+| `logs [N\|ip\|all] [--lines N]` | Affiche le log complet de pqc_bench.sh sur la VM |
 | `reset [N\|ip\|all]` | Remet en idle, kill le test si en cours |
-| `results` | Collecte les CSV, produit `master_[mode]_N.csv` (numerotation auto) |
+| `results` | Collecte les CSV, inclut la ligne serveur, produit `master_[mode]_N.csv` |
 | `compare [--output FILE]` | Lit tous les master CSV et produit un comparatif inter-modes |
 | `help` | Liste des commandes |
 | `exit` / `quit` | Quitte le CLI |
 
-> **Mode et IP automatiques :** au demarrage, `pqc_bench.sh --server` ecrit un fichier `.server_mode`
-> contenant le mode et son IP. `server_cli.py` le lit pour remplir automatiquement `--mode` et
-> `--target` dans la commande `set`. Si le serveur a plusieurs interfaces reseau, specifier
-> `--server-ip <IP>` au lancement pour choisir la bonne adresse.
-> Un `--mode` fourni manuellement different du serveur est refuse pour eviter des mesures invalides.
+> **Mode et IP automatiques :** `pqc_bench.sh --server` ecrit `.server_mode` avec le mode et l'IP.
+> `set` les detecte automatiquement. Specifier `--server-ip` au demarrage pour choisir l'interface test.
 
 ### Etats d'une VM
 
@@ -189,97 +278,201 @@ idle --> configured --> armed --> running --> done
   |______________ reset ______________________|
 ```
 
-### Workflow complet depuis le serveur
+En cas d'agent injoignable lors d'un re-scan : `unreachable` (conserve en memoire, ID intact).
+
+### Workflow complet avec supervision
 
 ```bash
-# 1. Decouvrir les VMs avec vm_agent actif
-pqc> scan 192.168.1.0/24
-  [1] 192.168.1.10   [idle]
-  [2] 192.168.1.11   [idle]
-  [3] 192.168.1.12   [idle]
-3 agent(s) detecte(s).
+# === PREPARATION ===
 
-# 2. Configurer toutes les VMs (mode et IP auto-detectes depuis le serveur)
+# 1. Scanner le LAN test (detecte les agents, assigne les IDs)
+pqc> scan --test 192.168.141.0/24
+  [1] 192.168.141.10   [idle]
+  [2] 192.168.141.11   [idle]
+  [3] 192.168.141.12   [idle]
+  3 agent(s) detecte(s).
+
+# 2. Scanner le LAN controle (appaire les IPs controle aux IDs)
+pqc> scan --control 192.168.142.0/24
+  [1] 192.168.141.10  <->  ctrl: 192.168.142.10
+  [2] 192.168.141.11  <->  ctrl: 192.168.142.11
+  [3] 192.168.141.12  <->  ctrl: 192.168.142.12
+  3 VM(s) appairees.
+
+# (Variante : les deux en une commande)
+pqc> scan --test 192.168.141.0/24 --control 192.168.142.0/24
+
+# 3. Verifier le tableau (colonne IP CTRL renseignee)
+pqc> list
+  [1] 192.168.141.10  ctrl:192.168.142.10  idle   preset=1  hybrid-full
+  [2] 192.168.141.11  ctrl:192.168.142.11  idle   preset=2  hybrid-full
+  [3] 192.168.141.12  ctrl:192.168.142.12  idle   preset=3  hybrid-full
+
+# === CONFIGURATION ===
+
+# 4. Configurer toutes les VMs (mode et IP auto-detectes depuis .server_mode)
 pqc> set all --preset 2
-  [mode auto: hybrid-full]
-  [target auto: 192.168.1.1]
-  192.168.1.10: OK  [vm_id=1]
-  192.168.1.11: OK  [vm_id=2]
-  192.168.1.12: OK  [vm_id=3]
+  [mode auto: hybrid-full]  [target auto: 192.168.141.1]
+  192.168.141.10: OK  [vm_id=1]
+  192.168.141.11: OK  [vm_id=2]
+  192.168.141.12: OK  [vm_id=3]
 
-# 3. Ou configurer chaque VM par son numero de scan
+# Ou configurer les VMs par preset different
 pqc> set 1 --preset 1
 pqc> set 2 --preset 3
 pqc> set 3 --preset 5
 
-# On peut aussi cibler plusieurs VMs a la fois
-pqc> set 1,3 --preset 2
-
-# 4. Mettre toutes les VMs en standby
+# 5. Mettre en standby
 pqc> arm all
 
-# 5. (optionnel) Verifier l'environnement avant de lancer
+# 6. (optionnel) Verifier l'environnement
 pqc> preflight
-  [192.168.1.10] 8/8 ok
-  [192.168.1.11] 7/8 ok  1 WARN
+  [192.168.141.10] 8/8 ok
+  [192.168.141.11] 7/8 ok  1 WARN
       WARN: droits:tshark — ni root ni CAP_NET_RAW
-  [192.168.1.12] 8/8 ok
+  [192.168.141.12] 8/8 ok
 [OK] Toutes les VMs sont pretes.
 
-# 6. Lancement simultane — pre-flight execute automatiquement, aborte sur FAIL
+# === LANCEMENT ===
+
+# 7. Lancer simultanement (pre-flight auto inclus)
 pqc> launch
-  [192.168.1.10] 8/8 ok
-  [192.168.1.11] 8/8 ok
-  [192.168.1.12] 8/8 ok
+  Run ID: hybrid-full_14           ← identifiant unique du run (mode + index)
+  Pre-flight check (3 VM(s))...
+  [OK] Toutes les VMs sont pretes.
 
-  Signal envoye en 3 ms
-  192.168.1.10: demarre (pid 1234)
-  192.168.1.11: demarre (pid 1235)
-  192.168.1.12: demarre (pid 1236)
+  Connexion aux 3 VM(s) pour lancement synchronise...
+  Signal envoye en 4 ms
+  192.168.141.10: demarre (pid 1234)
+  192.168.141.11: demarre (pid 1235)
+  192.168.141.12: demarre (pid 1236)
 
-# En cas de probleme bloquant detecte par le pre-flight :
-# pqc> launch --force   # force le lancement avec avertissement
+# Le monitoring serveur demarre automatiquement.
+# Grafana (http://<serveur>:3000) affiche les metriques en direct.
+# Pas besoin de 'status' en boucle — une notification arrive a la fin :
 
-# 7. Surveiller l'avancement (affiche aussi les derniers logs)
-pqc> status
-  192.168.1.10: running  {'mode': 'hybrid-full', 'preset': 2, ...}
-    | [INFO] Handshake #42/100...
-  192.168.1.11: done  rc=0
+[TEST TERMINE] 3/3 VM(s) done
+>>> Tapez 'results' pour collecter les resultats.
+pqc>
 
-# 8. En cas de probleme, consulter les logs complets
-pqc> logs 192.168.1.10 --lines 30
-
-# 9. Collecter les resultats du test (genere master_hybrid-full_1.csv)
+# 8. Collecter les resultats
 pqc> results
-  192.168.1.10: 6 evenement(s) [hybrid-full]
-  192.168.1.11: 6 evenement(s) [hybrid-full]
-  192.168.1.12: 6 evenement(s) [hybrid-full]
-  Master CSV: results/master_hybrid-full_1.csv
+  192.168.141.10: 6 evenement(s) [hybrid-full]
+  192.168.141.11: 6 evenement(s) [hybrid-full]
+  192.168.141.12: 6 evenement(s) [hybrid-full]
+  serveur (192.168.141.1): CPU=16.2%  RAM=1862 Mo  RX=643.7 Mbps  (72 echantillons, 360s)
+  Master CSV: results/master_hybrid-full_14.csv
 
 pqc> reset all
 
-# 10. Relancer le serveur en mode classic, refaire le cycle, puis comparer
+# 9. Relancer le serveur en mode classic, refaire le cycle
 pqc> compare
-  Comparatif: results/compare_20260622T180000.csv  (2 ligne(s) sur 2 master(s))
+  Comparatif: results/compare_20260703T180000.csv
 ```
 
-### Format des fichiers de resultats
+> **Lancement `--force`** : ignore les echecs FAIL du pre-flight et lance quand meme.
+
+---
+
+## Supervision temps reel
+
+### Stack technique
+
+```text
+VMs clientes          Serveur WAN
+────────────          ───────────────────────────────────────────
+telegraf   ──────────► InfluxDB v2 :8086  ◄─── server_cli.py (_SrvMonitor)
+pqc_bench.sh ─────────►                   ◄─── pqc_bench.sh (VM)
+                              │
+                        Grafana :3000
+                              │
+                      Dashboard "Live"      → par run_id, rafraichi toutes les 10s
+                      Dashboard "Compare"   → comparaison multi-run, bar charts
+```
+
+### Demarrage
+
+```bash
+# Sur le serveur
+docker compose up -d
+
+# Variables d'environnement (serveur ET VMs si push depuis pqc_bench.sh)
+export INFLUX_URL=http://192.168.141.1:8086
+export INFLUX_TOKEN=pqc-bench-token-changeme
+export INFLUX_ORG=pqc
+export INFLUX_BUCKET=pqc_bench
+```
+
+### Metriques collectees
+
+| Measurement InfluxDB | Source | Tags principaux | Champs |
+| --- | --- | --- | --- |
+| `handshake` | `pqc_bench.sh` (VM) | `run_id`, `vm`, `mode`, `wan` | `hs_min`, `hs_avg`, `hs_max`, `hs_p99`, `tcp_connect_ms`, `ttfb_ms` |
+| `traffic` | `pqc_bench.sh` (VM) | `run_id`, `vm`, `mode`, `profile` | `throughput_mbps`, `retransmit_pct` |
+| `event` | `pqc_bench.sh` (preset, VM) | `run_id`, `vm`, `mode`, `profile` | `hs_ms`, `throughput_mbps`, `retransmit_pct` |
+| `net_quality` | `pqc_bench.sh` (VM) | `run_id`, `vm`, `mode` | `jitter_ms`, `loss_pct`, `loss_udp_pct` |
+| `server_metrics` | `server_cli.py` (_SrvMonitor) | `run_id` | `cpu_pct`, `ram_mb`, `rx_mbps` |
+| `cpu`, `mem`, `net` | Telegraf (VMs) | `host` | metriques systeme standard |
+
+### Identifiant de run (`run_id`)
+
+A chaque `launch`, `server_cli.py` genere automatiquement un identifiant unique :
+
+```text
+run_id = <mode>_<index>     ex: hybrid-full_14, classic_3
+```
+
+L'index correspond au prochain `master_<mode>_N.csv` qui sera cree par `results`.
+Toutes les metriques InfluxDB du run portent ce tag, permettant d'isoler un run
+dans Grafana ou de comparer plusieurs runs cote a cote.
+
+### Dashboards Grafana
+
+Disponibles apres `docker compose up -d` sur `http://<serveur>:3000` (admin / pqcadmin) :
+
+**PQC Bench — Live** (`pqc-live-01`)
+
+- Filtre par `run_id` (liste deroulante auto-alimentee)
+- Rafraichissement toutes les 10s
+- Panneaux : handshake latence, debit par profil, jitter UDP, CPU/RAM VMs (Telegraf), CPU/RX serveur
+
+**PQC Bench — Comparaison multi-run** (`pqc-compare-01`)
+
+- Bar charts par `run_id` sur 7 jours glissants
+- Handshake moyen/P99, TTFB, debit par profil, retransmissions, jitter, packet loss, CPU serveur
+
+### Configuration en production
+
+Pour changer le token par defaut (recommande) :
+
+1. Editer `docker-compose.yml` : `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN`
+2. Editer `grafana/provisioning/datasources/influxdb.yml` : `token`
+3. Mettre a jour la variable `INFLUX_TOKEN` sur le serveur et les VMs
+
+---
+
+## Format des fichiers de resultats
 
 **CSV bruts** (generes par `pqc_bench.sh` sur chaque VM) : une ligne par evenement de trafic.
 
-**Master CSV** (`master_[mode]_N.csv`) : une ligne aggregee par VM + lignes globales.
+**Master CSV** (`master_[mode]_N.csv`) : agrege par VM + ligne serveur + lignes globales.
 Numerotation automatique — les anciens fichiers ne sont jamais ecrases.
 
 ```text
-Source               | Mode        | WAN | Handshake_moy_ms | Handshake_min_ms | Debit_moy_Mbps | CPU_moy_pct | ...
-192.168.1.10         | hybrid-full | eu  | 22.4             | 18.1             | 9.8            | 5.1         | ...
-192.168.1.11         | hybrid-full | eu  | 21.8             | 17.9             | 10.1           | 4.9         | ...
-192.168.1.12         | hybrid-full | eu  | 23.1             | 18.5             | 9.5            | 5.3         | ...
-GLOBAL_MOY (n=3 VMs) | hybrid-full | eu  | 22.4             | 18.2             | 9.8            | 5.1         | ...
-GLOBAL_MIN           | hybrid-full | eu  | 21.8             | 17.9             | 9.5            | 4.9         | ...
-GLOBAL_MAX           | hybrid-full | eu  | 23.1             | 18.5             | 10.1           | 5.3         | ...
-GLOBAL_ECART_TYPE    | hybrid-full | eu  | 0.67             | 0.31             | 0.31           | 0.20        | ...
+Source                  | Mode        | Type_test | WAN | Handshake_moy_ms | Debit_moy_Mbps | CPU_moy_pct | ...
+192.168.141.10          | hybrid-full | preset_1  | eu  | 840.0            | 32.0           | 1.7         | ...
+192.168.141.11          | hybrid-full | preset_2  | eu  | 164.3            | 151.7          | 3.6         | ...
+192.168.141.12          | hybrid-full | preset_3  | eu  | 164.8            | 2.2            | 1.2         | ...
+192.168.141.1           | hybrid-full | server    | eu  |                  | 643.7          | 16.2        | ...
+GLOBAL_MOY (n=3 VMs)    | hybrid-full | -         | eu  | 295.0            | 84.2           | 2.1         | ...
+GLOBAL_MIN              | hybrid-full | -         | eu  | 151.8            | 2.2            | 1.2         | ...
+GLOBAL_MAX              | hybrid-full | -         | eu  | 840.0            | 180.8          | 3.6         | ...
+GLOBAL_ECART_TYPE       | hybrid-full | -         | eu  | 304.7            | 77.9           | 1.1         | ...
 ```
+
+> La ligne `server` (Type_test=server) contient les metriques du serveur WAN collectees par
+> `_SrvMonitor` pendant la duree exacte du test : CPU moyen, RAM moyenne, debit RX entrant.
+> Les lignes GLOBAL_* excluent le serveur (VMs uniquement).
 
 **Comparatif inter-modes** (`compare_[timestamp].csv`, commande `compare`) :
 extrait les lignes `GLOBAL_MOY` de tous les master CSV pour comparer les modes cote a cote.
@@ -292,7 +485,7 @@ Selection via `--mode <MODE>` (voir aussi `./pqc_bench.sh --list-modes`) :
 
 | Priorite | Mode | KEM | Signature (certificat) | AES | Standard |
 | --- | --- | --- | --- | --- | --- |
-| ★★★ | `hybrid-full` | X25519 + ML-KEM-768 | ECDSA P-256 + ML-DSA-65 | 256-GCM | **Cible CNSA 2.0** |
+| ★★★ | `hybrid-full` | X25519 + ML-KEM-768 | ECDSA P-384 + ML-DSA-65 | 256-GCM | **Cible CNSA 2.0** |
 | ★★☆ | `hybrid-kem` | X25519 + ML-KEM-768 | ECDSA P-256 | 256-GCM | Transition hybride KEM |
 | ★★☆ | `classic` | X25519 (ECDHE) | ECDSA P-256 | 256-GCM | Baseline classique |
 | ★☆☆ | `mlkem768` | ML-KEM-768 | ECDSA P-256 | 256-GCM | FIPS 203 Cat.3 |
@@ -373,15 +566,16 @@ python3 traffic_presets.py list
 # Aide serveur (liste des modes, options)
 sudo ./pqc_bench.sh --server --help
 
-# Lancer le serveur (le mode choisi ici est transmis automatiquement aux VMs)
-sudo ./pqc_bench.sh --server --mode hybrid-full --wan-profile eu
+# Lancer le serveur (le mode est transmis automatiquement aux VMs via .server_mode)
+# --server-ip = IP de l'interface LAN TEST (obligatoire si plusieurs interfaces)
+sudo ./pqc_bench.sh --server --mode hybrid-full --wan-profile eu --server-ip 192.168.141.1
 ```
 
 Le serveur lance :
 
 - Un serveur de trafic custom `traffic_server.py` (TCP :5300, UDP :5301) — multi-client, zero contention
 - Un serveur TLS en boucle (port 8443) avec le bon mode cryptographique
-- La simulation de latence WAN via `tc-netem`
+- La simulation de latence WAN via `tc-netem` sur l'interface de test uniquement
 
 ### Profils de latence WAN
 
@@ -408,39 +602,38 @@ Le serveur lance :
 --hs-count <N>        Iterations pour la mesure de handshake bulk (defaut: 100)
 --output <DIR>        Repertoire de sortie CSV (defaut: ./results)
 --wan-profile <p>     Profil latence WAN pour --server : fr | eu | us
---server-ip <IP>      Force l'IP ecrite dans .server_mode (plusieurs interfaces)
+--server-ip <IP>      IP de l'interface LAN TEST ecrite dans .server_mode
+--vm-id <N>           Identifiant de la VM (assigne automatiquement par server_cli.py)
+--run-id <ID>         Identifiant du run pour InfluxDB (assigne automatiquement par server_cli.py)
 --scan [SUBNET]       Scan reseau (defaut: sous-reseau local /24)
 --install             Installe les dependances (sudo requis)
 --server --help       Affiche l'aide serveur avec la liste des modes valides
 ```
 
-> Les metriques de capture reseau (`Fragmentation_pct`, `Handshake_paquets`, `Handshake_octets`)
-> necessitent `tshark` et l'execution en `sudo`. Sans ces droits, les colonnes affichent `-1`.
+**Variables d'environnement** (surchargent les valeurs par defaut) :
+
+```bash
+INFLUX_URL=http://192.168.141.1:8086   # si vide, supervision desactivee (silencieux)
+INFLUX_TOKEN=pqc-bench-token-changeme
+INFLUX_ORG=pqc
+INFLUX_BUCKET=pqc_bench
+RUN_ID=hybrid-full_14                  # normalement assigne via --run-id par server_cli.py
+```
 
 ---
 
-## Format de sortie CSV
+## Colonnes CSV
 
-Les fichiers sont ecrits dans `results/` :
-
-```text
-{vm_ip}_{mode}_{preset}_{ts}.csv    # CSV brut par VM (une ligne par evenement)
-log_{mode}_{preset}.txt             # Log de pqc_bench.sh (commande logs)
-raw_{ip}_{ts}.csv                   # Copie individuelle collectee par results
-master_{mode}_N.csv                 # Master agrege du test N pour ce mode
-compare_{ts}.csv                    # Comparatif inter-modes (commande compare)
-```
-
-### Colonnes du CSV brut (par evenement)
+### CSV brut (par evenement, produit par pqc_bench.sh)
 
 | Colonne | Description | Outil requis |
 | --- | --- | --- |
 | `Horodatage` | Timestamp du test | — |
-| `VM_IP` | IP de la VM cliente | — |
+| `VM_IP` | IP de la VM cliente (interface test) | — |
 | `Serveur_IP` | IP du serveur WAN cible | — |
 | `Mode` | Mode cryptographique teste | — |
 | `Type_test` | Type de test (preset_1, preset_2...) | — |
-| `Profil` | Profil de trafic de l'evenement (msg, web, file, voip, stream) | — |
+| `Profil` | Profil de trafic (msg, web, file, voip, stream) | — |
 | `Libelle` | Description lisible de l'evenement | — |
 | `Suite_chiffrement` | Suite TLS negociee | — |
 | `AES_bits` | Taille de cle AES (128 ou 256) | — |
@@ -450,43 +643,34 @@ compare_{ts}.csv                    # Comparatif inter-modes (commande compare)
 | `Debit_Mbps` | Debit mesure par traffic_server.py (Mbps) | — |
 | `CPU_moy_pct` | CPU moyen de la VM pendant le test | — |
 | `RAM_moy_Mo` | RAM utilisee pendant le test (Mo) | — |
-| `Retransmissions_pct` | Taux de retransmissions TCP (toujours 0.0 avec traffic\_server, non mesure) | — |
+| `Retransmissions_pct` | Taux de retransmissions TCP | — |
 | `Taille_cle_octets` | Taille de la cle privee (octets) | — |
 | `Taille_cert_octets` | Taille du certificat (octets) | — |
-| **Metriques reseau — mesures pendant l'evenement** | | |
-| `Ping_moy_ms` | RTT moyen pendant le trafic (ping en parallele) | ping |
-| `Ping_min_ms` | RTT minimum | ping |
-| `Ping_max_ms` | RTT maximum | ping |
-| `Ping_p99_ms` | RTT 99e percentile | hping3 / ping |
-| `Jitter_ms` | Variation de latence UDP — voip et stream uniquement, -1 sinon | traffic\_server |
+| `Ping_moy_ms` / `min` / `max` / `p99` | RTT ICMP pendant le trafic | ping, hping3 |
+| `Jitter_ms` | Variation de latence UDP — voip/stream uniquement, -1 sinon | traffic_server |
 | `Packet_loss_pct` | Taux de perte global (ICMP) | ping |
-| `Packet_loss_UDP_pct` | Taux de perte UDP — voip et stream uniquement, -1 sinon | traffic\_server |
-| **Metriques handshake reseau — capture du premier handshake** | | |
+| `Packet_loss_UDP_pct` | Taux de perte UDP — voip/stream uniquement, -1 sinon | traffic_server |
 | `Fragmentation_pct` | % de paquets fragmentes pendant le handshake TLS | tshark + sudo |
 | `Handshake_paquets` | Nombre de paquets echanges pendant le handshake | tshark + sudo |
 | `Handshake_octets` | Volume total en octets du handshake | tshark + sudo |
-| **Latence applicative** | | |
 | `TCP_connect_ms` | Duree d'etablissement TCP seul, avant TLS | hping3 |
-| `TTFB_ms` | Time To First Byte TLS (premier octet recu via openssl s_client) | openssl |
+| `TTFB_ms` | Time To First Byte TLS (premier octet recu) | openssl |
 | `Connexions_echec` | Nombre d'echecs de connexion sur l'ensemble du test | — |
 
-> Les colonnes marquees `-1` sont non disponibles soit parce que l'outil manque,
-> soit parce que la metrique n'est pas pertinente pour ce profil.
-
-### Colonnes du master CSV (agrege par VM)
+### Master CSV (agrege par VM)
 
 | Colonne | Description |
 | --- | --- |
-| `Source` | IP de la VM ou libelle GLOBAL_* |
+| `Source` | IP de la VM, IP du serveur (Type_test=server), ou libelle GLOBAL_* |
 | `Mode` | Mode cryptographique |
+| `Type_test` | preset_N pour les VMs, `server` pour la ligne serveur, `-` pour GLOBAL |
 | `WAN` | Profil de latence WAN |
 | `Handshake_moy_ms` / `min` / `max` | Statistiques handshake sur tous les evenements |
 | `Debit_moy_Mbps` / `min` / `max` | Statistiques debit (valeurs -1 exclues) |
-| `CPU_moy_pct` | CPU moyen |
+| `CPU_moy_pct` | CPU moyen (VM pendant le test, ou serveur via _SrvMonitor) |
 | `RAM_moy_Mo` | RAM moyenne |
-| `Retransmissions_moy_pct` | Taux de retransmissions moyen (toujours 0.0 avec traffic\_server) |
-| `Ping_moy_ms` / `Ping_min_ms` / `Ping_max_ms` | Statistiques RTT ICMP |
-| `Ping_p99_moy_ms` | Moyenne des p99 de latence entre VMs |
+| `Retransmissions_moy_pct` | Taux de retransmissions moyen |
+| `Ping_moy_ms` / `min` / `max` / `Ping_p99_moy_ms` | Statistiques RTT ICMP |
 | `Jitter_moy_ms` | Jitter UDP moyen (voip/stream uniquement) |
 | `Packet_loss_moy_pct` | Perte paquets globale moyenne |
 | `Packet_loss_UDP_moy_pct` | Perte paquets UDP moyenne (voip/stream uniquement) |
@@ -495,40 +679,8 @@ compare_{ts}.csv                    # Comparatif inter-modes (commande compare)
 | `Handshake_octets_moy` | Volume moyen en octets par handshake |
 | `TCP_connect_moy_ms` | Temps d'etablissement TCP moyen |
 | `TTFB_moy_ms` | TTFB TLS moyen |
-| `Connexions_echec_total` | Somme des echecs de connexion (pas une moyenne) |
+| `Connexions_echec_total` | Somme des echecs de connexion |
 | `Nb_evenements` | Nombre d'evenements de trafic du test |
-
----
-
-## Workflow de comparaison PQC vs Classique
-
-```text
-SERVEUR WAN                                        VMs CLIENTES
------------                                        ------------
-1. pqc_bench.sh --server --mode classic --wan-profile eu
-
-2. server_cli.py
-   pqc> scan 192.168.x.0/24
-   pqc> set all --preset 2
-   #    [mode auto: classic]  [target auto: 192.168.x.1]
-   pqc> arm all
-   pqc> launch              ------>   [pre-flight auto, puis test lance simultanement]
-   pqc> status              (attente fin du test, logs visibles en cas d'erreur)
-   pqc> results             <------   [genere master_classic_1.csv]
-   pqc> reset all
-
-3. Ctrl+C sur le serveur, relancer avec un autre mode, repeter :
-   pqc_bench.sh --server --mode hybrid-kem  --wan-profile eu
-   # [mode auto: hybrid-kem]  -> master_hybrid-kem_1.csv
-   pqc_bench.sh --server --mode hybrid-full --wan-profile eu
-   # [mode auto: hybrid-full] -> master_hybrid-full_1.csv
-
-# Modes supplementaires selon les besoins :
-# mlkem512, mlkem768, mlkem1024, mldsa44, mldsa65, mldsa87, slhdsa128, slhdsa256
-
-4. Generer le comparatif final
-   pqc> compare             <------   [compare_[ts].csv avec tous les modes cote a cote]
-```
 
 ---
 
@@ -541,22 +693,20 @@ SERVEUR WAN                                        VMs CLIENTES
 | `Handshake_moy_ms` | Overhead direct de PQC vs classique a chaque connexion |
 | `GLOBAL_ECART_TYPE Handshake_moy_ms` | Variabilite entre VMs (stabilite du test) |
 | `Debit_moy_Mbps` | Degradation du debit sous charge crypto |
-| `CPU_moy_pct` | Cout CPU (ML-DSA bien plus lourd que ML-KEM) |
-| `Retransmissions_moy_pct` | ~~Stabilite reseau~~ Non mesure avec traffic\_server (toujours 0.0) |
+| `CPU_moy_pct` (VM) | Cout CPU client (ML-DSA bien plus lourd que ML-KEM) |
+| `CPU_moy_pct` (server) | Cout CPU serveur (visible dans la ligne `server` du master) |
 
 ### Transport reseau
 
 | Metrique | Ce qu'elle revele |
 | --- | --- |
-| `Handshake_paquets_moy` | Impact de la taille des cles PQC sur le nombre de paquets — ML-KEM-768/1024 envoient plus de paquets que ECDHE |
-| `Handshake_octets_moy` | Volume reseau du handshake — cle publique ML-KEM-768 ≈ 1.1 KB vs 32 B pour X25519 |
-| `Fragmentation_moy_pct` | % de fragmentation MTU — les grandes cles PQC peuvent depasser 1500 B et fragmenter |
-| `TCP_connect_moy_ms` | Latence reseau brute (independante de la crypto) — baseline du chemin reseau |
-| `TTFB_moy_ms` | Latence percue par l'application — TCP + TLS, reflete l'impact reel utilisateur |
-| `Ping_moy_ms` / `Ping_p99_moy_ms` | Stabilite de la latence sous charge de trafic |
+| `Handshake_paquets_moy` | Impact de la taille des cles PQC sur le nombre de paquets |
+| `Handshake_octets_moy` | Volume reseau du handshake — cle ML-KEM-768 ≈ 1.1 KB vs 32 B pour X25519 |
+| `Fragmentation_moy_pct` | % de fragmentation MTU — les grandes cles PQC peuvent depasser 1500 B |
+| `TCP_connect_moy_ms` | Latence reseau brute (independante de la crypto) — baseline |
+| `TTFB_moy_ms` | Latence percue par l'application — TCP + TLS, impact reel utilisateur |
 | `Jitter_moy_ms` | Impact sur la voip/visio — un jitter > 30ms degrade la qualite audio |
 | `Packet_loss_UDP_moy_pct` | Perte sur les flux temps-reel — critique pour voip et stream |
-| `Connexions_echec_total` | Fiabilite globale — echecs TLS sur l'ensemble du test |
 
 ---
 
@@ -564,74 +714,77 @@ SERVEUR WAN                                        VMs CLIENTES
 
 | Port | Protocole | Usage |
 | --- | --- | --- |
-| 5300 | TCP | traffic\_server.py — trafic file/stream/web/msg/voip (controle multi-client) |
-| 5301 | UDP | traffic\_server.py — trafic voip et jitter (donnees bidirectionnelles) |
-
-> **traffic\_server.py** remplace le pool de 10 instances iperf3. Un seul processus accepte N connexions
-> simultanees sans contention de port. Chaque type de trafic (file, stream, web, msg, voip) est
-> demande via un header JSON sur la connexion TCP. La session voip utilise en plus le canal UDP 5301
-> pour le flux bidirectionnel ; le jitter est mesure cote serveur selon RFC 3550.
-
+| 5300 | TCP | traffic_server.py — trafic file/stream/web/msg/voip |
+| 5301 | UDP | traffic_server.py — trafic voip et jitter |
 | 8443 | TCP/TLS | Serveur TLS (handshake PQC) |
-| 9998 | TCP | vm_agent - controle par server_cli.py |
-| 9999 | TCP | Port marqueur (detection deploiement par --scan) |
+| 8086 | TCP | InfluxDB v2 (supervision) |
+| 3000 | TCP | Grafana (dashboards) |
+| 9998 | TCP | vm_agent — controle par server_cli.py (via LAN CONTROLE) |
+
+> **Separation des flux :** le port 9998 (controle) transite par le LAN 192.168.142.x et n'est
+> pas affecte par la simulation WAN (tc-netem appliquee uniquement sur l'interface 192.168.141.x).
 
 ---
 
 ## Depannage
 
+### Installation et prerequis
+
 | Probleme | Solution |
 | --- | --- |
-| `Permission denied` apres `git clone` ou `git pull` | `chmod +x pqc_bench.sh` (voir ci-dessous) |
-| `sudo: 'pqc_bench.sh': command not found` | Utiliser `sudo ./pqc_bench.sh` (le `./` est obligatoire) |
+| `Permission denied` apres git clone | `chmod +x pqc_bench.sh` |
+| `sudo: 'pqc_bench.sh': command not found` | Utiliser `sudo ./pqc_bench.sh` |
 | `oqsprovider not found` apres `--install` | Relancer `sudo ./pqc_bench.sh --install` |
-| `openssl list -providers` ne montre pas `oqsprovider` malgre une installation reussie | Le `.so` a ete installe dans un repertoire different de celui ecrit dans `openssl.cnf` (comportement cmake sur Ubuntu 24+/26+). Verifier avec `find /usr -name "oqsprovider.so"` puis corriger avec `sudo ln -s <chemin_reel> /usr/local/lib/ossl-modules/oqsprovider.so` (creer le dossier si necessaire : `sudo mkdir -p /usr/local/lib/ossl-modules`). Ce bug est corrige dans la version actuelle de `--install` qui detecte le chemin dynamiquement. |
-| Connexion refusee sur port 5300 | Verifier que `traffic_server.py` tourne sur le serveur (lance automatiquement par `--server`) |
-| Debit nul sur certaines VMs (`0.0 Mbps`) malgre le serveur actif | Verifier que `traffic_server.py` est en cours d'execution sur le serveur. Avec le nouveau systeme il n'y a plus de contention de port — plusieurs VMs peuvent se connecter simultanement. |
-| `openssl s_client: handshake failure` | Le mode du client et du serveur doivent correspondre |
-| `tc: command not found` | Installer `iproute2` ; sans tc la simulation WAN est desactivee |
-| Resultats trop variables | Augmenter `--hs-count 200` et `--duration 120` |
-| `date +%s%3N` ne fonctionne pas | Verifier GNU date (`apt install coreutils`) |
-| Instance traffic_server residuelle | `pkill -f "traffic_server.py"` |
-| Le serveur boucle apres Ctrl+C + relance | `sudo pkill -f "openssl s_server"; sudo pkill -f "traffic_server.py"` |
-| `scan` ne trouve aucun agent | Verifier que `python3 vm_agent.py` tourne sur les VMs et que le port 9998 est ouvert |
-| VM bloquee en etat `armed` | Utiliser `reset <ip>` puis reconfigurer |
-| `results` retourne "aucun fichier" | Le test n'est peut-etre pas termine (`status` pour verifier) |
-| Lancement non simultane | Verifier la connectivite reseau ; un delai > 500ms indique un probleme |
-| Test se termine immediatement (etat `done` en quelques secondes) | Utiliser `logs <ip>` pour voir l'erreur dans pqc_bench.sh |
-| `--target manquant` lors du `set` | Ajouter `--target <IP_serveur_WAN>` a la commande set |
-| `ERREUR: --mode requis (serveur non demarre)` | Lancer `sudo ./pqc_bench.sh --server --mode MODE` avant d'utiliser `set` |
-| `ERREUR: mode X != mode du serveur Y` | Le serveur tourne avec un mode different — relancer le serveur avec le bon mode ou omettre `--mode` dans `set` |
-| `[ERR] Mode inconnu : 'xxx'` au demarrage du serveur | Le mode n'existe pas — lancer `sudo ./pqc_bench.sh --server --help` pour voir la liste |
-| `compare` ne trouve aucun master CSV | Lancer `results` au moins une fois pour generer un `master_*.csv` |
-| Colonnes `Fragmentation_pct`, `Handshake_paquets`, `Handshake_octets` toutes a `-1` | `tshark` absent ou script lance sans `sudo` — ces metriques necessitent CAP_NET_RAW |
-| Colonne `TCP_connect_ms` a `-1` | `hping3` absent — `sudo apt install hping3` |
-| Colonne `TTFB_ms` a `-1` | openssl ne parvient pas a etablir le handshake — verifier que le serveur est demarre et que le mode correspond |
-| `[WARN] tshark present mais non-root` | Relancer `vm_agent.py` avec `sudo` ou accorder CAP_NET_RAW a tshark |
-| `launch` abandonne avec `[ABORT]` | Le pre-flight a detecte des erreurs bloquantes — lire les lignes FAIL et corriger, ou utiliser `launch --force` pour forcer quand meme |
-| `preflight` signale `oqs-provider absent` | Relancer `sudo ./pqc_bench.sh --install` ou verifier `/etc/ssl/openssl.cnf` |
-| `preflight` signale `tls-8443 inaccessible` | Le serveur n'est pas demarre — lancer `sudo ./pqc_bench.sh --server --mode MODE` |
-| `preflight` signale `traffic :5300 inaccessible` | `traffic_server.py` n'est pas lance — le serveur le demarre automatiquement via `--server` |
+| `openssl list -providers` ne montre pas oqsprovider | `find /usr -name "oqsprovider.so"` puis `sudo ln -s <chemin> /usr/local/lib/ossl-modules/oqsprovider.so` |
 
-### Permissions apres git clone / git pull
+### Serveur et trafic
 
-Sur Linux, les fichiers `.sh` clones depuis Windows n'ont pas le bit executable.
-A lancer une seule fois apres chaque clone ou pull :
+| Probleme | Solution |
+| --- | --- |
+| Connexion refusee sur port 5300 | Verifier que `traffic_server.py` tourne (lance par `--server`) |
+| `openssl s_client: handshake failure` | Mode client et serveur doivent correspondre |
+| `tc: command not found` | `sudo apt install iproute2` |
+| Instance traffic_server residuelle | `sudo pkill -f "traffic_server.py"` |
+| Serveur boucle apres Ctrl+C | `sudo pkill -f "openssl s_server"; sudo pkill -f "traffic_server.py"` |
+
+### server_cli.py et VMs
+
+| Probleme | Solution |
+| --- | --- |
+| `scan` ne trouve aucun agent | Verifier que `vm_agent.py` tourne et que le port 9998 est ouvert |
+| `scan --control` n'appaire pas de VM | Verifier que les agents ont deja un ID (faire `scan --test` d'abord) |
+| VM en `unreachable` apres re-scan | La VM etait connue mais injoignable — `reset <ip>` ou attendre qu'elle revienne |
+| `--force-remove` / `--force-keep` | Flags pour eviter le prompt interactif lors d'un re-scan avec VMs manquantes |
+| `list` ne montre pas IP CTRL | Faire `scan --control <subnet>` apres le scan test |
+| `launch` sans run_id affiche | Normal si aucune VM armed — faire `arm all` d'abord |
+| `[TEST TERMINE]` n'arrive pas | Le watcher timeout apres 1h — utiliser `status` pour verifier |
+| `results` retourne "aucun fichier" | Le test n'est pas termine (`status`) ou la VM a plante (`logs`) |
+| `ERREUR: mode X != mode du serveur Y` | Relancer le serveur avec le bon mode ou omettre `--mode` dans `set` |
+| Colonnes `Fragmentation_pct` toutes a `-1` | `tshark` absent ou script sans `sudo` |
+| Colonne `TCP_connect_ms` a `-1` | `sudo apt install hping3` |
+| `launch` abandonne avec `[ABORT]` | Pre-flight a echoue — lire les FAIL, ou `launch --force` |
+
+### Supervision (InfluxDB / Grafana)
+
+| Probleme | Solution |
+| --- | --- |
+| Grafana ne demarre pas | `docker compose logs grafana` ; verifier que le port 3000 est libre |
+| InfluxDB inaccessible | `docker compose logs influxdb` ; verifier le port 8086 |
+| Aucune donnee dans Grafana | Verifier que `INFLUX_URL` est defini sur le serveur et les VMs |
+| Dashboard "Live" vide | Selectionner le bon `run_id` dans le menu deroulant en haut |
+| `server_metrics` absent | La supervision ne demarre qu'a `launch` — les runs anterieurs n'ont pas de donnees serveur |
+| Telegraf n'envoie pas de donnees | `sudo journalctl -u telegraf -f` ; verifier l'URL et le token dans `/etc/telegraf/telegraf.conf` |
+| Token InfluxDB refuse | Regenerer via l'UI InfluxDB (:8086) et mettre a jour `INFLUX_TOKEN` + `telegraf.conf` + datasource Grafana |
+| Pas de `run_id` dans les donnees VM | Verifier que `INFLUX_URL` est export sur les VMs ET que `--run-id` est passe par `vm_agent.py` |
+| Redemarrer proprement la stack | `docker compose down && docker compose up -d` (les volumes sont persistants) |
+| Purger toutes les donnees | `docker compose down -v` (supprime les volumes — irreversible) |
+
+### Permissions apres git clone
 
 ```bash
 chmod +x pqc_bench.sh
+git config core.fileMode false   # evite les changements de permissions dans git diff
 ```
-
-Pour ne plus avoir a le refaire apres un `git pull`, il est possible de configurer git
-pour ignorer le mode des fichiers localement :
-
-```bash
-git config core.fileMode false
-```
-
-> Note : cela desactive uniquement la detection locale des changements de permissions,
-> les permissions sur la VM restent inchangees apres un pull suivant.
-> Il faudra relancer `chmod +x pqc_bench.sh` si le fichier est remplace par un pull.
 
 ---
 
@@ -642,3 +795,5 @@ git config core.fileMode false
 - [NIST FIPS 205 - SLH-DSA](https://csrc.nist.gov/pubs/fips/205/final)
 - [Open Quantum Safe - liboqs](https://github.com/open-quantum-safe/liboqs)
 - [OQS Provider for OpenSSL 3](https://github.com/open-quantum-safe/oqs-provider)
+- [InfluxDB v2 line protocol](https://docs.influxdata.com/influxdb/v2/reference/syntax/line-protocol/)
+- [Telegraf documentation](https://docs.influxdata.com/telegraf/v1/)

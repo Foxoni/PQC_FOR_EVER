@@ -33,6 +33,13 @@ PRESET=""
 ACTION="test"
 SCAN_SUBNET=""
 COLLECT_FILE=""
+RUN_ID="${RUN_ID:-}"          # passé par server_cli.py via --run-id (ex: hybrid-full_14)
+
+# InfluxDB — surchargeables via env ou CLI
+INFLUX_URL="${INFLUX_URL:-}"
+INFLUX_ORG="${INFLUX_ORG:-pqc}"
+INFLUX_BUCKET="${INFLUX_BUCKET:-pqc_bench}"
+INFLUX_TOKEN="${INFLUX_TOKEN:-pqc-bench-token-changeme}"
 
 # =============================================================================
 # PORTS
@@ -122,6 +129,16 @@ has_cmd()       { command -v "$1" &>/dev/null; }
 require_root()  { [[ $EUID -eq 0 ]] || die "Nécessite sudo : sudo $0 $*"; }
 timestamp()     { date +"%Y%m%dT%H%M%S"; }
 now_ms()        { local t; t=$(date +%s%N); echo $(( t / 1000000 )); }  # ms : divise ns par 1e6 (compatible toutes versions de date)
+
+# Pousse une ligne InfluxDB line protocol vers l'instance configurée.
+# Silencieux si INFLUX_URL ou RUN_ID n'est pas défini.
+influx_push() {
+    [[ -z "${INFLUX_URL:-}" || -z "${RUN_ID:-}" ]] && return 0
+    curl -sf -XPOST \
+        "${INFLUX_URL}/api/v2/write?org=${INFLUX_ORG}&bucket=${INFLUX_BUCKET}&precision=s" \
+        -H "Authorization: Token ${INFLUX_TOKEN}" \
+        --data-raw "$1" 2>/dev/null || true
+}
 
 local_ip() {
     local ip
@@ -827,6 +844,14 @@ ${jitter_val},${NET_LOSS_PCT},${loss_udp_val},\
 ${HS_FRAG_PCT},${HS_PKTS},${HS_BYTES},\
 ${TCP_CONNECT_MS},${TTFB_MS},${CONN_ERRORS}"
 
+            influx_push "traffic,run_id=${RUN_ID},vm=${vm_ip},mode=${mode},wan=${WAN_PROFILE},profile=${profile} \
+throughput_mbps=${throughput},retransmit_pct=${retransmit} $(date +%s)"
+            case "$profile" in
+                voip|stream)
+                    influx_push "net_quality,run_id=${RUN_ID},vm=${vm_ip},mode=${mode},wan=${WAN_PROFILE} \
+jitter_ms=${jitter_val},loss_pct=${NET_LOSS_PCT},loss_udp_pct=${loss_udp_val} $(date +%s)" ;;
+            esac
+
             rm -f "$result_file"
         done
     } > "$out_file"
@@ -858,7 +883,11 @@ collect_preset_metrics() {
               "$HS_FRAG_PCT" "$HS_PKTS" "$HS_BYTES" \
               "$TCP_CONNECT_MS" "$TTFB_MS" "$CONN_ERRORS" \
               "$out_file" <<'EOF'
-import json, sys, csv
+import json, sys, csv, os, time
+try:
+    import urllib.request as _urlreq
+except ImportError:
+    _urlreq = None
 
 try:
     data = json.load(open(sys.argv[1]))
@@ -875,6 +904,26 @@ net_jitter, loss_pct, loss_udp_pct = sys.argv[16], sys.argv[17], sys.argv[18]
 frag_pct, hs_pkts, hs_bytes = sys.argv[19], sys.argv[20], sys.argv[21]
 tcp_connect, ttfb, conn_err = sys.argv[22], sys.argv[23], sys.argv[24]
 outfile = sys.argv[25]
+
+run_id     = os.environ.get("RUN_ID", "")
+influx_url = os.environ.get("INFLUX_URL", "")
+influx_org = os.environ.get("INFLUX_ORG", "pqc")
+influx_bkt = os.environ.get("INFLUX_BUCKET", "pqc_bench")
+influx_tok = os.environ.get("INFLUX_TOKEN", "")
+
+def _influx_push(line):
+    if not influx_url or not run_id or not _urlreq:
+        return
+    try:
+        req = _urlreq.Request(
+            f"{influx_url}/api/v2/write?org={influx_org}&bucket={influx_bkt}&precision=s",
+            data=line.encode(),
+            headers={"Authorization": f"Token {influx_tok}", "Content-Type": "text/plain"},
+            method="POST",
+        )
+        _urlreq.urlopen(req, timeout=2)
+    except Exception:
+        pass
 
 UDP_PROFILES = {"voip", "stream"}
 
@@ -898,6 +947,9 @@ try:
         for e in data.get("events", []):
             profil = e.get("type", "?")
             is_udp = profil in UDP_PROFILES
+            hs_ms  = e.get("handshake_ms", 0)
+            dbt    = e.get("throughput_mbps", 0)
+            rtr    = e.get("retransmit_pct", 0)
             w.writerow({
                 "Horodatage": ts, "VM_IP": vm_ip, "Serveur_IP": target,
                 "Mode": mode, "Type_test": data.get("schedule", "?"),
@@ -905,10 +957,10 @@ try:
                 "Suite_chiffrement": cipher, "AES_bits": aes_bits,
                 "Delai_planifie_s": e.get("planned_delay_s", 0),
                 "Duree_reelle_s": e.get("actual_duration_s", 0),
-                "Handshake_ms": e.get("handshake_ms", 0),
-                "Debit_Mbps": e.get("throughput_mbps", 0),
+                "Handshake_ms": hs_ms,
+                "Debit_Mbps": dbt,
                 "CPU_moy_pct": cpu, "RAM_moy_Mo": ram,
-                "Retransmissions_pct": e.get("retransmit_pct", 0),
+                "Retransmissions_pct": rtr,
                 "Taille_cle_octets": key_sz, "Taille_cert_octets": cert_sz,
                 "Ping_moy_ms": ping_moy, "Ping_min_ms": ping_min,
                 "Ping_max_ms": ping_max, "Ping_p99_ms": ping_p99,
@@ -922,6 +974,18 @@ try:
                 "TTFB_ms":             ttfb,
                 "Connexions_echec":    conn_err,
             })
+            now = int(time.time())
+            _influx_push(
+                f"event,run_id={run_id},vm={vm_ip},mode={mode},"
+                f"wan={os.environ.get('WAN_PROFILE', 'eu')},profile={profil} "
+                f"hs_ms={hs_ms},throughput_mbps={dbt},retransmit_pct={rtr} {now}"
+            )
+            if is_udp:
+                _influx_push(
+                    f"net_quality,run_id={run_id},vm={vm_ip},mode={mode},"
+                    f"wan={os.environ.get('WAN_PROFILE', 'eu')} "
+                    f"jitter_ms={net_jitter},loss_pct={loss_pct},loss_udp_pct={loss_udp_pct} {now}"
+                )
 except OSError as exc:
     print(f"[ERR] Écriture CSV {outfile}: {exc}", file=sys.stderr)
     sys.exit(1)
@@ -1133,6 +1197,9 @@ cmd_test() {
     [[ -z "$TARGET" ]] && die "--target <IP> requis"
     check_deps || log_warn "Dépendances manquantes — résultats partiels possibles"
 
+    # Exporter les variables de supervision pour les sous-processus Python (inline)
+    export RUN_ID WAN_PROFILE INFLUX_URL INFLUX_ORG INFLUX_BUCKET INFLUX_TOKEN
+
     trap 'rm -rf "$CERT_DIR"; stop_monitor; wait_traffic' EXIT INT TERM
     crypto_gen_certs "$MODE"
 
@@ -1146,6 +1213,10 @@ cmd_test() {
 
         # Mesure handshake bulk (baseline statistique + métriques réseau one-shot)
         measure_handshake "$MODE" "$TARGET" "$HANDSHAKE_COUNT"
+        influx_push "handshake,run_id=${RUN_ID},vm=$(local_ip),mode=${MODE},wan=${WAN_PROFILE} \
+hs_min=${HS_MIN},hs_avg=${HS_AVG},hs_max=${HS_MAX},hs_p99=${HS_P99},\
+tcp_connect_ms=${TCP_CONNECT_MS},ttfb_ms=${TTFB_MS},conn_errors=${CONN_ERRORS}i \
+$(date +%s)"
 
         # Monitoring CPU/RAM + mesures réseau en parallèle pendant le preset
         start_monitor
@@ -1188,6 +1259,10 @@ cmd_test() {
         log_section "TEST | mode: $MODE | profils: $PROFILES | cible: $TARGET | durée: ${DURATION}s"
 
         measure_handshake "$MODE" "$TARGET" "$HANDSHAKE_COUNT"
+        influx_push "handshake,run_id=${RUN_ID},vm=$(local_ip),mode=${MODE},wan=${WAN_PROFILE} \
+hs_min=${HS_MIN},hs_avg=${HS_AVG},hs_max=${HS_MAX},hs_p99=${HS_P99},\
+tcp_connect_ms=${TCP_CONNECT_MS},ttfb_ms=${TTFB_MS},conn_errors=${CONN_ERRORS}i \
+$(date +%s)"
         start_monitor
         net_ping_start   "$TARGET" $(( DURATION + 15 ))
         net_jitter_start "$TARGET" $(( DURATION + 15 ))
@@ -1547,6 +1622,7 @@ while [[ $# -gt 0 ]]; do
         --wan-profile)  WAN_PROFILE="$2";     shift ;;
         --server-ip)    SERVER_IP="$2";       shift ;;
         --vm-id)        VM_ID="$2";           shift ;;
+        --run-id)       RUN_ID="$2";          shift ;;
         -h|--help)
             if [[ "$ACTION" == "server" ]]; then usage_server; else usage; fi
             ;;

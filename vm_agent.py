@@ -107,7 +107,7 @@ class VMAgent:
             self.state = "armed"
             return {"ok": True, "state": self.state}
 
-    def _start(self, _req):
+    def _start(self, req):
         with self._lock:
             if self.state != "armed":
                 return {"ok": False, "error": f"etat '{self.state}' invalide pour start"}
@@ -125,6 +125,9 @@ class VMAgent:
                 cmd += ["--duration", str(self.cfg["duration"])]
             if self.cfg.get("vm_id"):
                 cmd += ["--vm-id", str(self.cfg["vm_id"])]
+            run_id = req.get("run_id", "")
+            if run_id:
+                cmd += ["--run-id", run_id]
 
             self._run_start = time.time()
             try:
