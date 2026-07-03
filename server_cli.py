@@ -145,23 +145,25 @@ class _SrvMonitor:
 
 
 class VM:
-    __slots__ = ("ip", "state", "config", "last_seen")
+    __slots__ = ("ip", "control_ip", "state", "config", "last_seen")
 
     def __init__(self, ip):
-        self.ip        = ip
-        self.state     = "unknown"
-        self.config    = {}
-        self.last_seen = None
+        self.ip         = ip
+        self.control_ip = None   # IP interface contrôle (None = même que test)
+        self.state      = "unknown"
+        self.config     = {}
+        self.last_seen  = None
 
 
 class ServerCLI:
 
     def __init__(self, default_subnet=None):
-        self.vms    = {}
-        self.subnet = default_subnet
-        self._idx   = {}   # {1: "192.168.x.y", ...} — assigne par cmd_scan
+        self.vms         = {}
+        self.subnet      = default_subnet
+        self._idx        = {}         # {id: test_ip} — assigne par cmd_scan
+        self._freed_ids  = set()      # IDs libérés, réutilisables en priorité
         self._mon        = _SrvMonitor()
-        self._mon_result = {}   # rempli par _watch_until_done quand le test se termine
+        self._mon_result = {}         # rempli par _watch_until_done quand le test se termine
 
     def _resolve(self, target):
         """Convertit 'all', '1', '2,3', ou une IP en liste d'IPs.
@@ -186,10 +188,10 @@ class ServerCLI:
     # Transport JSON                                                       #
     # ------------------------------------------------------------------ #
 
-    def _send(self, ip, req, timeout=5.0):
-        """Envoie req JSON a l'agent ip:AGENT_PORT, renvoie la reponse JSON."""
+    def _send_raw(self, addr, req, timeout=5.0):
+        """Connexion directe à addr:AGENT_PORT — pas de lookup VM."""
         try:
-            with socket.create_connection((ip, AGENT_PORT), timeout=timeout) as s:
+            with socket.create_connection((addr, AGENT_PORT), timeout=timeout) as s:
                 s.settimeout(timeout)
                 s.sendall((json.dumps(req) + "\n").encode())
                 buf = b""
@@ -198,7 +200,7 @@ class ServerCLI:
                     if not chunk:
                         break
                     buf += chunk
-                    if len(buf) > 10 * 1024 * 1024:   # 10 Mo max
+                    if len(buf) > 10 * 1024 * 1024:
                         return {"ok": False, "error": "reponse trop grande (>10 Mo)"}
                 return json.loads(buf.split(b"\n")[0])
         except json.JSONDecodeError as e:
@@ -206,61 +208,196 @@ class ServerCLI:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def _send(self, ip, req, timeout=5.0):
+        """Envoie req à la VM identifiée par son IP test, via l'IP contrôle si disponible."""
+        vm   = self.vms.get(ip)
+        addr = vm.control_ip if (vm and vm.control_ip) else ip
+        return self._send_raw(addr, req, timeout)
+
     # ------------------------------------------------------------------ #
     # Commandes                                                            #
     # ------------------------------------------------------------------ #
 
-    def cmd_scan(self, args):
-        subnet = args[0] if args else self.subnet
-        if not subnet:
-            print("Usage: scan <subnet>  ex: scan 192.168.1.0/24"); return
-        self.subnet = subnet
+    def _next_scan_id(self):
+        """Retourne le plus petit ID disponible (libérés en priorité, sinon max+1)."""
+        if self._freed_ids:
+            return min(self._freed_ids)
+        used = set(self._idx.keys())
+        return max(used) + 1 if used else 1
 
+    def _scan_test(self, subnet, force_remove=False, force_keep=False):
         try:
             hosts = list(ipaddress.ip_network(subnet, strict=False).hosts())
         except ValueError as e:
-            print(f"Sous-reseau invalide: {e}"); return
+            print(f"Sous-réseau invalide : {e}"); return
 
-        print(f"Scan de {len(hosts)} adresses ({subnet})...")
-        found_pairs = []
+        print(f"Scan LAN test — {len(hosts)} adresses ({subnet})...")
 
+        # Étape 1 : découverte des agents qui répondent
+        alive = {}
         def probe(ip):
-            r = self._send(str(ip), {"cmd": "STATUS"}, timeout=SCAN_TIMEOUT)
+            r = self._send_raw(str(ip), {"cmd": "STATUS"}, timeout=SCAN_TIMEOUT)
             return (str(ip), r) if r.get("ok") else None
 
         with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:
-            futures = {ex.submit(probe, h): h for h in hosts}
-            for future in as_completed(futures):
-                pair = future.result()
+            for fut in as_completed({ex.submit(probe, h): h for h in hosts}):
+                pair = fut.result()
                 if pair:
-                    found_pairs.append(pair)
+                    alive[pair[0]] = pair[1]
 
-        # Tri par IP pour des indices stables entre deux scans
-        found_pairs.sort(key=lambda p: ipaddress.ip_address(p[0]))
-        self._idx = {}
-        for n, (ip, status) in enumerate(found_pairs, 1):
-            vm = self.vms.setdefault(ip, VM(ip))
+        found_ips  = set(alive.keys())
+        ip_to_id   = {v: k for k, v in self._idx.items()}   # test_ip → id
+
+        # Étape 2 : réconciliation des VMs connues qui n'ont pas répondu
+        to_remove = []
+        for ip, vm in list(self.vms.items()):
+            if ip in found_ips or vm.state == "unreachable":
+                continue
+            vm_id  = ip_to_id.get(ip)
+            id_str = f"ID {vm_id}" if vm_id is not None else "sans ID"
+
+            if force_remove:
+                to_remove.append((ip, vm_id))
+                print(f"  [REMOVE] Agent {id_str} ({ip})")
+            elif force_keep:
+                vm.state = "unreachable"
+                print(f"  [UNREACHABLE] Agent {id_str} ({ip}) marqué injoignable")
+            else:
+                ans = input(f"\n  Agent {id_str} ({ip}) introuvable — supprimer ? [y/N] ").strip().lower()
+                if ans == "y":
+                    to_remove.append((ip, vm_id))
+                else:
+                    vm.state = "unreachable"
+                    print(f"    → conservé (unreachable)")
+
+        for ip, vm_id in to_remove:
+            if vm_id is not None:
+                self._idx.pop(vm_id, None)
+                self._freed_ids.add(vm_id)
+            self.vms.pop(ip, None)
+            vm_id_str = str(vm_id) if vm_id is not None else "?"
+            print(f"    → {ip} supprimé, ID {vm_id_str} libéré")
+
+        # Étape 3 : attribution / récupération des IDs pour les IPs trouvées
+        for ip in sorted(found_ips, key=ipaddress.ip_address):
+            status = alive[ip]
+            r      = self._send_raw(ip, {"cmd": "GET_ID"}, timeout=2.0)
+            agent_id = r.get("id") if r.get("ok") else None
+
+            if agent_id is not None and self._idx.get(agent_id) == ip:
+                # ID cohérent avec nos registres → réutiliser
+                action = "existant"
+                vm_id  = agent_id
+            elif agent_id is not None and agent_id not in self._idx:
+                # ID inconnu de nous (session précédente ?) → adopter
+                self._freed_ids.discard(agent_id)
+                self._idx[agent_id] = ip
+                action = "adopté"
+                vm_id  = agent_id
+            else:
+                # Pas d'ID ou conflit → assigner un nouvel ID
+                vm_id = self._next_scan_id()
+                self._freed_ids.discard(vm_id)
+                self._idx[vm_id] = ip
+                self._send_raw(ip, {"cmd": "ASSIGN_ID", "id": vm_id}, timeout=2.0)
+                action = "nouveau" if agent_id is None else f"réassigné (conflit ID {agent_id})"
+
+            vm           = self.vms.setdefault(ip, VM(ip))
             vm.state     = status.get("state", "unknown")
             vm.config    = status.get("config", {})
             vm.last_seen = datetime.now().strftime("%H:%M:%S")
-            self._idx[n] = ip
-            print(f"  [{n}] {ip:17s}  [{vm.state}]")
+            print(f"  [{vm_id}] {ip:17s}  [{vm.state}]  ({action})")
 
-        print(f"{len(found_pairs)} agent(s) detecte(s).")
+        print(f"\n{len(found_ips)} agent(s) détecté(s) sur le LAN test.")
+
+    def _scan_control(self, subnet):
+        try:
+            hosts = list(ipaddress.ip_network(subnet, strict=False).hosts())
+        except ValueError as e:
+            print(f"Sous-réseau invalide : {e}"); return
+
+        print(f"\nScan LAN contrôle — {len(hosts)} adresses ({subnet})...")
+
+        found = []
+        def probe_ctrl(ip):
+            r = self._send_raw(str(ip), {"cmd": "GET_ID"}, timeout=SCAN_TIMEOUT)
+            if r.get("ok") and r.get("id") is not None:
+                return (str(ip), r["id"])
+            return None
+
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:
+            for fut in as_completed({ex.submit(probe_ctrl, h): h for h in hosts}):
+                result = fut.result()
+                if result:
+                    found.append(result)
+
+        found.sort(key=lambda p: ipaddress.ip_address(p[0]))
+
+        matched = 0
+        for ctrl_ip, vm_id in found:
+            test_ip = self._idx.get(vm_id)
+            if test_ip and test_ip in self.vms:
+                self.vms[test_ip].control_ip = ctrl_ip
+                print(f"  [{vm_id}] test={test_ip}  ctrl={ctrl_ip}  ✓")
+                matched += 1
+            else:
+                print(f"  [?] {ctrl_ip} → ID {vm_id} inconnu (absent du scan test)")
+
+        print(f"{matched}/{len(found)} liaison(s) contrôle établie(s).")
+
+    def cmd_scan(self, args):
+        force_remove   = "--force-remove" in args
+        force_keep     = "--force-keep"   in args
+        test_subnet    = None
+        control_subnet = None
+
+        if force_remove and force_keep:
+            print("[ERR] --force-remove et --force-keep sont mutuellement exclusifs"); return
+
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--test" and i + 1 < len(args):
+                test_subnet = args[i + 1]; i += 2
+            elif a == "--control" and i + 1 < len(args):
+                control_subnet = args[i + 1]; i += 2
+            elif not a.startswith("--"):
+                test_subnet = a; i += 1   # compat positionnelle
+            else:
+                i += 1
+
+        if not test_subnet:
+            test_subnet = self.subnet
+
+        if not test_subnet and not control_subnet:
+            print("Usage: scan --test <subnet> [--control <subnet>] [--force-remove|--force-keep]")
+            print("       scan <subnet>  (compat — équivalent à --test <subnet>)")
+            return
+
+        if test_subnet:
+            self.subnet = test_subnet
+            self._scan_test(test_subnet, force_remove, force_keep)
+
+        if control_subnet:
+            self._scan_control(control_subnet)
 
     def cmd_list(self, args):
         if not self.vms:
-            print("Aucune VM connue. Lancez 'scan <subnet>' d'abord."); return
+            print("Aucune VM connue. Lancez 'scan --test <subnet>' d'abord."); return
 
-        idx_rev = {v: k for k, v in self._idx.items()}   # ip -> n
-        print(f"\n{'#':3s}  {'IP':17s}  {'ETAT':12s}  {'PRESET':7s}  {'MODE':16s}  {'WAN':5s}  VU A")
-        print("-" * 76)
+        idx_rev = {v: k for k, v in self._idx.items()}   # test_ip -> id
+        print(f"\n{'#':3s}  {'IP TEST':17s}  {'IP CTRL':17s}  {'ETAT':12s}  "
+              f"{'PRESET':7s}  {'MODE':16s}  {'WAN':5s}  VU A")
+        print("-" * 100)
         for ip, vm in sorted(self.vms.items(),
                               key=lambda kv: ipaddress.ip_address(kv[0])):
-            n = str(idx_rev.get(ip, "-"))
-            print(f"{n:3s}  {ip:17s}  {vm.state:12s}  {str(vm.config.get('preset', '-')):7s}"
-                  f"  {vm.config.get('mode', '-'):16s}  {vm.config.get('wan_profile', '-'):5s}"
-                  f"  {vm.last_seen or '-'}")
+            n    = str(idx_rev.get(ip, "-"))
+            ctrl = vm.control_ip or "-"
+            print(f"{n:3s}  {ip:17s}  {ctrl:17s}  {vm.state:12s}  "
+                  f"{str(vm.config.get('preset', '-')):7s}  "
+                  f"{vm.config.get('mode', '-'):16s}  "
+                  f"{vm.config.get('wan_profile', '-'):5s}  "
+                  f"{vm.last_seen or '-'}")
         print()
 
     def _server_state(self):
@@ -438,13 +575,16 @@ class ServerCLI:
         go        = threading.Event()
 
         def fire(ip):
+            vm   = self.vms.get(ip)
+            addr = vm.control_ip if (vm and vm.control_ip) else ip
+
             def _signal():
                 with rlock:
                     ready_n[0] += 1
                     if ready_n[0] == len(armed):
                         all_ready.set()
             try:
-                with socket.create_connection((ip, AGENT_PORT), timeout=10) as s:
+                with socket.create_connection((addr, AGENT_PORT), timeout=10) as s:
                     _signal()
                     if not go.wait(timeout=15):
                         results[ip] = {"ok": False, "error": "timeout go"}
@@ -533,17 +673,22 @@ class ServerCLI:
     def cmd_status(self, args):
         target = args[0] if args else "all"
         for ip in self._resolve(target):
-            r = self._send(ip, {"cmd": "STATUS"})
+            r  = self._send(ip, {"cmd": "STATUS"})
+            vm = self.vms.setdefault(ip, VM(ip))
             if r.get("ok"):
-                vm = self.vms.setdefault(ip, VM(ip))
-                vm.state  = r["state"]
-                vm.config = r.get("config", vm.config)
-                rc        = r.get("returncode")
-                rc_str    = f"  rc={rc}" if rc is not None else ""
-                print(f"  {ip}: {r['state']}{rc_str}  {r.get('config', {})}")
+                prev_state   = vm.state
+                vm.state     = r["state"]
+                vm.config    = r.get("config", vm.config)
+                vm.last_seen = datetime.now().strftime("%H:%M:%S")
+                rc           = r.get("returncode")
+                rc_str       = f"  rc={rc}" if rc is not None else ""
+                recovered    = "  [RECOVERED]" if prev_state == "unreachable" else ""
+                print(f"  {ip}: {r['state']}{rc_str}{recovered}  {r.get('config', {})}")
                 if r.get("last_log"):
                     for line in r["last_log"]:
                         print(f"    | {line}")
+            elif vm.state == "unreachable":
+                print(f"  {ip}: toujours injoignable")
             else:
                 print(f"  {ip}: injoignable — {r.get('error')}")
 
@@ -893,8 +1038,12 @@ class ServerCLI:
 
     def cmd_help(self, _args):
         print("""
-  scan [subnet]                                              Decouverte des agents (ex: 192.168.1.0/24)
-  list                                                       Tableau des VMs et leur etat
+  scan --test <subnet> [--control <subnet>]                  Découverte des agents
+       [--force-remove | --force-keep]                         --test   : LAN de test (trafic + mesures)
+                                                               --control: LAN de contrôle (orchestration)
+                                                               --force-remove : supprime sans prompt les agents disparus
+                                                               --force-keep   : conserve sans prompt (unreachable)
+  list                                                       Tableau des VMs et leur etat (IP test + ctrl)
   set <ip|all> --mode MODE --target IP [--preset N] [...]   Configure une ou toutes les VMs
   arm [all|<ip>]                                             Met les VMs configurees en standby
   preflight [all|<ip>]                                       Verifie l'environnement de chaque VM

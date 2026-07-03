@@ -28,14 +28,15 @@ LOG_TAIL   = 20   # nombre de lignes retournees par STATUS et GET_LOGS
 
 class VMAgent:
     def __init__(self):
-        self._lock      = threading.Lock()
-        self.state      = "idle"
-        self.cfg        = {}
-        self.proc       = None
-        self.outfile    = None   # trouve apres la fin du test
-        self.logfile    = None
-        self.returncode = None
-        self._run_start = 0.0
+        self._lock       = threading.Lock()
+        self.state       = "idle"
+        self.cfg         = {}
+        self.proc        = None
+        self.outfile     = None   # trouve apres la fin du test
+        self.logfile     = None
+        self.returncode  = None
+        self._run_start  = 0.0
+        self.assigned_id = None   # attribué par server_cli.py lors du scan
 
     # ------------------------------------------------------------------ #
     # Handlers                                                             #
@@ -176,6 +177,13 @@ class VMAgent:
             return {"ok": False, "error": "aucun fichier de resultats"}
         return {"ok": True, "content": Path(path).read_text(), "file": path}
 
+    def _assign_id(self, req):
+        self.assigned_id = req.get("id")
+        return {"ok": True, "id": self.assigned_id}
+
+    def _get_id(self, _req):
+        return {"ok": True, "id": self.assigned_id}
+
     def _get_logs(self, req):
         if not self.logfile or not Path(self.logfile).exists():
             return {"ok": False, "error": "aucun fichier de log"}
@@ -308,6 +316,8 @@ class VMAgent:
         "GET_RESULTS": _get_results,
         "GET_LOGS":    _get_logs,
         "PREFLIGHT":   _preflight,
+        "ASSIGN_ID":   _assign_id,
+        "GET_ID":      _get_id,
     }
 
     # ------------------------------------------------------------------ #
