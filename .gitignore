@@ -56,3 +56,11 @@ desktop.ini
 # ─── Variables d'environnement ───────────────────────────────────────────────
 .env
 .env.local
+.env.*.local
+
+# ─── Docker ──────────────────────────────────────────────────────────────────
+# Surcharge locale (ports, bind mounts specifiques a la machine)
+docker-compose.override.yml
+# Donnees persistantes si montees en bind mount plutot que volumes nommes
+influxdb-data/
+grafana-data/

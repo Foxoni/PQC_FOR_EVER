@@ -7,10 +7,10 @@ datasources:
     url: http://influxdb:8086
     jsonData:
       version: Flux
-      organization: pqc
-      defaultBucket: pqc_bench
+      organization: ${INFLUX_ORG}
+      defaultBucket: ${INFLUX_BUCKET}
       tlsSkipVerify: true
     secureJsonData:
-      token: pqc-bench-token-changeme
+      token: ${INFLUX_TOKEN}
     isDefault: true
     editable: true

@@ -183,23 +183,28 @@ sudo ./pqc_bench.sh --install
 #### Lancer la stack de supervision (optionnel mais recommande)
 
 ```bash
-# Depuis le repertoire du projet
+# 1. Creer le fichier de secrets a partir du template (jamais commite)
+cp .env.example .env
+nano .env   # definir les mots de passe et le token
+
+# 2. Demarrer les conteneurs
 docker compose up -d
 
-# Grafana : http://<IP_serveur>:3000  (admin / pqcadmin)
-# InfluxDB : http://<IP_serveur>:8086 (admin / pqcadmin123)
+# Grafana  : http://<IP_serveur>:3000  (identifiants definis dans .env)
+# InfluxDB : http://<IP_serveur>:8086  (identifiants definis dans .env)
 ```
 
-Exporter les variables pour activer la collecte automatique :
+Exporter les variables pour activer la collecte automatique depuis le serveur et les VMs :
 
 ```bash
 export INFLUX_URL=http://localhost:8086
-export INFLUX_TOKEN=pqc-bench-token-changeme   # a changer en production
+export INFLUX_TOKEN=<valeur INFLUX_TOKEN du .env>
 export INFLUX_ORG=pqc
 export INFLUX_BUCKET=pqc_bench
 ```
 
 > Ajouter ces exports dans `~/.bashrc` ou `/etc/environment` pour qu'ils persistent.
+> Ne jamais mettre le token directement dans un script commite.
 
 #### Lancer le serveur de benchmark
 
@@ -393,12 +398,15 @@ pqc_bench.sh ─────────►                   ◄─── pqc_b
 ### Demarrage
 
 ```bash
-# Sur le serveur
+# 1. Configurer les secrets (a faire une seule fois)
+cp .env.example .env && nano .env
+
+# 2. Demarrer la stack
 docker compose up -d
 
-# Variables d'environnement (serveur ET VMs si push depuis pqc_bench.sh)
+# 3. Exporter le token pour le serveur (et les VMs)
 export INFLUX_URL=http://192.168.141.1:8086
-export INFLUX_TOKEN=pqc-bench-token-changeme
+export INFLUX_TOKEN=<valeur INFLUX_TOKEN du .env>
 export INFLUX_ORG=pqc
 export INFLUX_BUCKET=pqc_bench
 ```
@@ -774,7 +782,7 @@ RUN_ID=hybrid-full_14                  # normalement assigne via --run-id par se
 | Dashboard "Live" vide | Selectionner le bon `run_id` dans le menu deroulant en haut |
 | `server_metrics` absent | La supervision ne demarre qu'a `launch` — les runs anterieurs n'ont pas de donnees serveur |
 | Telegraf n'envoie pas de donnees | `sudo journalctl -u telegraf -f` ; verifier l'URL et le token dans `/etc/telegraf/telegraf.conf` |
-| Token InfluxDB refuse | Regenerer via l'UI InfluxDB (:8086) et mettre a jour `INFLUX_TOKEN` + `telegraf.conf` + datasource Grafana |
+| Token InfluxDB refuse | Regenerer via l'UI InfluxDB (:8086), mettre a jour `.env` + `telegraf.conf`, puis `docker compose restart grafana` |
 | Pas de `run_id` dans les donnees VM | Verifier que `INFLUX_URL` est export sur les VMs ET que `--run-id` est passe par `vm_agent.py` |
 | Redemarrer proprement la stack | `docker compose down && docker compose up -d` (les volumes sont persistants) |
 | Purger toutes les donnees | `docker compose down -v` (supprime les volumes — irreversible) |
