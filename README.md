@@ -221,17 +221,54 @@ python3 server_cli.py
 
 #### Installer Telegraf (supervision systeme)
 
-```bash
-sudo apt install -y telegraf
+Telegraf n'est pas dans les depots Ubuntu — ajouter le depot InfluxData :
 
+```bash
+# 1. Importer la cle GPG InfluxData
+wget -qO /tmp/influxdata.key https://repos.influxdata.com/influxdata-archive_compat.key
+gpg --dearmor < /tmp/influxdata.key | sudo tee /etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg > /dev/null
+
+# 2. Ajouter le depot
+echo 'deb [signed-by=/etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg] https://repos.influxdata.com/debian stable main' | \
+  sudo tee /etc/apt/sources.list.d/influxdata.list
+
+# 3. Installer
+sudo apt update && sudo apt install -y telegraf
+```
+
+Configurer et demarrer :
+
+```bash
 # Editer le template : remplacer INFLUX_URL et INFLUX_TOKEN
 sudo cp telegraf.conf /etc/telegraf/telegraf.conf
 sudo nano /etc/telegraf/telegraf.conf
 # Modifier : urls = ["http://<IP_SERVEUR>:8086"]
-#            token = "pqc-bench-token-changeme"
+#            token = "<valeur INFLUX_TOKEN du .env du serveur>"
 
 sudo systemctl enable --now telegraf
 ```
+
+#### Exporter les variables de supervision
+
+Pour que `vm_agent.py` envoie les heartbeats a InfluxDB, exporter les variables suivantes
+(**INFLUX_URL pointe vers le serveur**, pas localhost) :
+
+```bash
+export INFLUX_URL=http://192.168.142.1:8086   # IP controle du serveur (LAN 192.168.142.x)
+export INFLUX_TOKEN=<valeur INFLUX_TOKEN du .env du serveur>
+export INFLUX_ORG=pqc
+export INFLUX_BUCKET=pqc_bench
+```
+
+Ajouter ces exports dans `~/.bashrc` pour qu'ils persistent apres reconnexion :
+
+```bash
+nano ~/.bashrc   # coller les 4 lignes export a la fin
+source ~/.bashrc
+```
+
+> Sans ces variables, `vm_agent.py` demarre normalement mais n'envoie pas de heartbeat —
+> les voyants restent rouges dans Grafana.
 
 #### Lancer le daemon de controle
 
