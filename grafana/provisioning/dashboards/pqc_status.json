@@ -1,0 +1,337 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": {"list": []},
+  "description": "Etat de la flotte VM avant lancement — voyant vert = VM armée et connectée à InfluxDB",
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "title": "Connectivité",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"fixedColor": "green", "mode": "fixed"},
+          "mappings": [
+            {
+              "type": "special",
+              "options": {"match": "null", "result": {"color": "red", "index": 0, "text": "non connecté"}}
+            },
+            {
+              "type": "special",
+              "options": {"match": "empty", "result": {"color": "red", "index": 1, "text": "non connecté"}}
+            }
+          ],
+          "noValue": "non connecté",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["count"], "fields": "", "values": false},
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state_code\")\n  |> group(columns: [\"host\"])\n  |> last()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "VMs connectées",
+      "type": "stat"
+    },
+
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red",    "value": null},
+              {"color": "yellow", "value": 1},
+              {"color": "green",  "value": 99}
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state_code\")\n  |> group(columns: [\"host\"])\n  |> last()\n  |> filter(fn: (r) => r._value == 2)\n  |> group()\n  |> count()",
+          "refId": "A"
+        }
+      ],
+      "title": "VMs armées",
+      "type": "stat"
+    },
+
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red",    "value": null},
+              {"color": "yellow", "value": 1},
+              {"color": "green",  "value": 99}
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state_code\")\n  |> group(columns: [\"host\"])\n  |> last()\n  |> filter(fn: (r) => r._value == 1)\n  |> group()\n  |> count()",
+          "refId": "A"
+        }
+      ],
+      "title": "VMs configurées",
+      "type": "stat"
+    },
+
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "text",  "value": null},
+              {"color": "green", "value": 1}
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state_code\")\n  |> group(columns: [\"host\"])\n  |> last()\n  |> filter(fn: (r) => r._value >= 3)\n  |> group()\n  |> count()",
+          "refId": "A"
+        }
+      ],
+      "title": "VMs en cours / terminées",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "id": 101,
+      "title": "Voyants par VM",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "displayName": "${__field.labels.host}",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {"color": "grey",   "index": 0, "text": "inconnu"},
+                "0":  {"color": "text",   "index": 1, "text": "idle"},
+                "1":  {"color": "#EAB839","index": 2, "text": "configurée"},
+                "2":  {"color": "green",  "index": 3, "text": "✓ armée"},
+                "3":  {"color": "green",  "index": 4, "text": "⏳ en cours"},
+                "4":  {"color": "blue",   "index": 5, "text": "terminée"}
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {"color": "red", "index": 6, "text": "⚠ hors ligne"}
+              }
+            }
+          ],
+          "noValue": "⚠ hors ligne",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red",    "value": null},
+              {"color": "text",   "value": 0},
+              {"color": "#EAB839","value": 1},
+              {"color": "green",  "value": 2},
+              {"color": "blue",   "value": 4}
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 6},
+      "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": true
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state_code\")\n  |> group(columns: [\"host\", \"vm_id\"])\n  |> last()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "État par VM   (vert = armée, rouge = hors ligne ou non connectée à InfluxDB)",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 12},
+      "id": 102,
+      "title": "Détail",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {"type": "color-background"},
+            "displayMode": "color-background"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "idle":      {"color": "text",    "index": 0},
+                "configured":{"color": "#EAB839", "index": 1},
+                "armed":     {"color": "green",   "index": 2},
+                "running":   {"color": "green",   "index": 3},
+                "done":      {"color": "blue",    "index": 4}
+              }
+            }
+          ]
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "host"},
+            "properties": [{"id": "displayName", "value": "Hostname"}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "vm_id"},
+            "properties": [{"id": "displayName", "value": "ID"}, {"id": "custom.width", "value": 60}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "_value"},
+            "properties": [{"id": "displayName", "value": "État"}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "_time"},
+            "properties": [
+              {"id": "displayName", "value": "Dernière vue"},
+              {"id": "unit", "value": "dateTimeAsLocal"}
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 13},
+      "id": 6,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": false, "enablePagination": false, "reducer": ["sum"], "show": false},
+        "showHeader": true,
+        "sortBy": [{"desc": false, "displayName": "ID"}]
+      },
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state\")\n  |> group(columns: [\"host\", \"vm_id\"])\n  |> last()\n  |> group()\n  |> keep(columns: [\"_time\", \"host\", \"vm_id\", \"_value\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Détail flotte",
+      "type": "table"
+    }
+
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["pqc", "status", "fleet"],
+  "templating": {"list": []},
+  "time": {"from": "now-5m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "PQC Bench — Statut Flotte",
+  "uid": "pqc-status-01",
+  "version": 1
+}

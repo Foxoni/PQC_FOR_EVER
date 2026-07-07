@@ -5,6 +5,7 @@ aggregate_*.csv
 
 # ─── Fichiers temporaires generes par le script ──────────────────────────────
 *.json
+!grafana/**/*.json
 timing_*.txt
 monitor_*.csv
 iperf_*.json

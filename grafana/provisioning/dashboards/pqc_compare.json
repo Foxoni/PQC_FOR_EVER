@@ -1,0 +1,201 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": { "list": [] },
+  "description": "Comparaison multi-run PQC Bench (handshake, débit, qualité réseau)",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Comparaison Handshake",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 1 },
+      "id": 1,
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" },
+        "xField": "run_id"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"handshake\" and (r._field == \"hs_avg\" or r._field == \"hs_p99\"))\n  |> group(columns: [\"run_id\", \"_field\"])\n  |> mean()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "Handshake moyen / P99 par run",
+      "type": "barchart"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 1 },
+      "id": 2,
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" },
+        "xField": "run_id"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"handshake\" and r._field == \"ttfb_ms\")\n  |> group(columns: [\"run_id\"])\n  |> mean()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "TTFB moyen par run (ms)",
+      "type": "barchart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 },
+      "id": 101,
+      "title": "Comparaison Débit",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "Mbps" },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 11 },
+      "id": 3,
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" },
+        "xField": "run_id"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"traffic\" and r._field == \"throughput_mbps\")\n  |> group(columns: [\"run_id\", \"profile\"])\n  |> mean()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "Débit moyen par run / profil (Mbps)",
+      "type": "barchart"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 11 },
+      "id": 4,
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" },
+        "xField": "run_id"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"traffic\" and r._field == \"retransmit_pct\")\n  |> group(columns: [\"run_id\"])\n  |> mean()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "Retransmissions TCP % par run",
+      "type": "barchart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 },
+      "id": 102,
+      "title": "Qualité réseau & Serveur",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 21 },
+      "id": 5,
+      "options": { "barWidth": 0.6, "xField": "run_id", "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"net_quality\" and r._field == \"jitter_ms\")\n  |> group(columns: [\"run_id\"])\n  |> mean()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "Jitter UDP moyen par run (ms)",
+      "type": "barchart"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 21 },
+      "id": 6,
+      "options": { "barWidth": 0.6, "xField": "run_id", "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"net_quality\" and r._field == \"loss_pct\")\n  |> group(columns: [\"run_id\"])\n  |> mean()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "Packet loss % par run",
+      "type": "barchart"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 21 },
+      "id": 7,
+      "options": { "barWidth": 0.6, "xField": "run_id", "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"server_metrics\" and r._field == \"cpu_pct\")\n  |> group(columns: [\"run_id\"])\n  |> mean()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "CPU serveur moyen par run (%)",
+      "type": "barchart"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["pqc", "compare"],
+  "templating": { "list": [] },
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "PQC Bench — Comparaison multi-run",
+  "uid": "pqc-compare-01",
+  "version": 1
+}
