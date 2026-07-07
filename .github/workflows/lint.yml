@@ -66,3 +66,40 @@ jobs:
           python3 -c "import vm_agent"
           python3 -c "import server_cli"
           echo "Imports OK"
+
+  # ─── Validation docker-compose.yml ─────────────────────────────────────────
+  # docker compose config valide la syntaxe YAML + la semantique Compose.
+  # Les variables du .env sont substituees par des valeurs factices pour CI.
+  docker-compose-lint:
+    name: docker-compose.yml syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        env:
+          INFLUX_ADMIN_USER:     ci_user
+          INFLUX_ADMIN_PASSWORD: ci_password
+          INFLUX_ORG:            pqc
+          INFLUX_BUCKET:         pqc_bench
+          INFLUX_TOKEN:          ci_token_placeholder
+          GRAFANA_ADMIN_USER:    ci_admin
+          GRAFANA_ADMIN_PASSWORD: ci_grafana
+        run: docker compose config --quiet
+
+  # ─── Validation fichiers de configuration Grafana ──────────────────────────
+  grafana-config:
+    name: Grafana config (JSON + YAML)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate dashboard JSON
+        run: |
+          for f in grafana/provisioning/dashboards/*.json; do
+            python3 -m json.tool "$f" > /dev/null && echo "OK: $f"
+          done
+      - name: Validate provisioning YAML
+        run: |
+          pip install pyyaml --quiet
+          for f in grafana/provisioning/**/*.yml; do
+            python3 -c "import yaml, sys; yaml.safe_load(open('$f'))" && echo "OK: $f"
+          done
