@@ -224,9 +224,9 @@ python3 server_cli.py
 Telegraf n'est pas dans les depots Ubuntu — ajouter le depot InfluxData :
 
 ```bash
-# 1. Importer la cle GPG InfluxData (sudo gpg pour eviter un fichier vide)
-wget -qO /tmp/influxdata.key https://repos.influxdata.com/influxdata-archive_compat.key
-sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg /tmp/influxdata.key
+# 1. Importer la cle GPG InfluxData depuis le keyserver Ubuntu
+sudo gpg --keyserver keyserver.ubuntu.com --recv-keys DA61C26A0585BD3B
+sudo gpg --export DA61C26A0585BD3B | sudo tee /etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg > /dev/null
 
 # 2. Ajouter le depot
 echo 'deb [signed-by=/etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg] https://repos.influxdata.com/debian stable main' | \
