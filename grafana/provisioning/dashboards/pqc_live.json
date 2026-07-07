@@ -17,7 +17,7 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -31,7 +31,7 @@
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"handshake\" and r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => r._field == \"hs_avg\" or r._field == \"hs_p99\" or r._field == \"hs_min\" or r._field == \"hs_max\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")",
           "refId": "A"
         }
@@ -40,7 +40,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "thresholds" }, "unit": "ms",
           "thresholds": { "mode": "absolute", "steps": [
@@ -56,7 +56,7 @@
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background" },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"handshake\" and r.run_id == \"${run_id}\" and r._field == \"hs_avg\")\n  |> last()",
           "refId": "A"
         }
@@ -65,7 +65,7 @@
       "type": "stat"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "thresholds" }, "unit": "ms",
           "thresholds": { "mode": "absolute", "steps": [
@@ -81,7 +81,7 @@
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background" },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"handshake\" and r.run_id == \"${run_id}\" and r._field == \"hs_p99\")\n  |> last()",
           "refId": "A"
         }
@@ -97,7 +97,7 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 }, "unit": "Mbps" },
         "overrides": []
@@ -107,7 +107,7 @@
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"traffic\" and r.run_id == \"${run_id}\" and r._field == \"throughput_mbps\")\n  |> group(columns: [\"vm\", \"profile\"])",
           "refId": "A"
         }
@@ -116,7 +116,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 }, "unit": "ms" },
         "overrides": []
@@ -126,7 +126,7 @@
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"net_quality\" and r.run_id == \"${run_id}\" and r._field == \"jitter_ms\")\n  |> group(columns: [\"vm\"])",
           "refId": "A"
         }
@@ -142,7 +142,7 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 }, "unit": "percent",
           "min": 0, "max": 100
@@ -154,7 +154,7 @@
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"cpu\" and r._field == \"usage_idle\")\n  |> map(fn: (r) => ({ r with _value: 100.0 - r._value }))\n  |> group(columns: [\"host\"])",
           "refId": "A"
         }
@@ -163,7 +163,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 }, "unit": "percent",
           "min": 0, "max": 100
@@ -175,7 +175,7 @@
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"mem\" and r._field == \"used_percent\")\n  |> group(columns: [\"host\"])",
           "refId": "A"
         }
@@ -184,7 +184,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 }, "unit": "Mbps" },
         "overrides": []
@@ -194,7 +194,7 @@
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"server_metrics\" and r.run_id == \"${run_id}\" and r._field == \"rx_mbps\")",
           "refId": "A"
         }
@@ -203,7 +203,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 }, "unit": "percent", "min": 0, "max": 100 },
         "overrides": []
@@ -213,7 +213,7 @@
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"server_metrics\" and r.run_id == \"${run_id}\" and r._field == \"cpu_pct\")",
           "refId": "A"
         }
@@ -229,7 +229,7 @@
     "list": [
       {
         "current": {},
-        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+        "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
         "definition": "from(bucket: \"pqc_bench\") |> range(start: -24h) |> filter(fn: (r) => r._measurement == \"handshake\") |> keep(columns: [\"run_id\"]) |> distinct(column: \"run_id\") |> sort(desc: true)",
         "hide": 0,
         "includeAll": false,

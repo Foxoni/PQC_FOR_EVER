@@ -17,7 +17,7 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" },
         "overrides": []
@@ -33,7 +33,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"handshake\" and (r._field == \"hs_avg\" or r._field == \"hs_p99\"))\n  |> group(columns: [\"run_id\", \"_field\"])\n  |> mean()\n  |> group()",
           "refId": "A"
         }
@@ -42,7 +42,7 @@
       "type": "barchart"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" },
         "overrides": []
@@ -58,7 +58,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"handshake\" and r._field == \"ttfb_ms\")\n  |> group(columns: [\"run_id\"])\n  |> mean()\n  |> group()",
           "refId": "A"
         }
@@ -74,7 +74,7 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "Mbps" },
         "overrides": []
@@ -90,7 +90,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"traffic\" and r._field == \"throughput_mbps\")\n  |> group(columns: [\"run_id\", \"profile\"])\n  |> mean()\n  |> group()",
           "refId": "A"
         }
@@ -99,7 +99,7 @@
       "type": "barchart"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" },
         "overrides": []
@@ -115,7 +115,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"traffic\" and r._field == \"retransmit_pct\")\n  |> group(columns: [\"run_id\"])\n  |> mean()\n  |> group()",
           "refId": "A"
         }
@@ -131,7 +131,7 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "ms" },
         "overrides": []
@@ -141,7 +141,7 @@
       "options": { "barWidth": 0.6, "xField": "run_id", "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"net_quality\" and r._field == \"jitter_ms\")\n  |> group(columns: [\"run_id\"])\n  |> mean()\n  |> group()",
           "refId": "A"
         }
@@ -150,7 +150,7 @@
       "type": "barchart"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" },
         "overrides": []
@@ -160,7 +160,7 @@
       "options": { "barWidth": 0.6, "xField": "run_id", "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"net_quality\" and r._field == \"loss_pct\")\n  |> group(columns: [\"run_id\"])\n  |> mean()\n  |> group()",
           "refId": "A"
         }
@@ -169,7 +169,7 @@
       "type": "barchart"
     },
     {
-      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" },
         "overrides": []
@@ -179,7 +179,7 @@
       "options": { "barWidth": 0.6, "xField": "run_id", "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
-          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB-PQC}" },
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"server_metrics\" and r._field == \"cpu_pct\")\n  |> group(columns: [\"run_id\"])\n  |> mean()\n  |> group()",
           "refId": "A"
         }

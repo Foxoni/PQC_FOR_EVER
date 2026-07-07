@@ -18,7 +18,7 @@
     },
 
     {
-      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
       "fieldConfig": {
         "defaults": {
           "color": {"fixedColor": "green", "mode": "fixed"},
@@ -50,7 +50,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state_code\")\n  |> group(columns: [\"host\"])\n  |> last()\n  |> group()",
           "refId": "A"
         }
@@ -60,7 +60,7 @@
     },
 
     {
-      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "thresholds"},
@@ -90,7 +90,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state_code\")\n  |> group(columns: [\"host\"])\n  |> last()\n  |> filter(fn: (r) => r._value == 2)\n  |> group()\n  |> count()",
           "refId": "A"
         }
@@ -100,7 +100,7 @@
     },
 
     {
-      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "thresholds"},
@@ -130,7 +130,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state_code\")\n  |> group(columns: [\"host\"])\n  |> last()\n  |> filter(fn: (r) => r._value == 1)\n  |> group()\n  |> count()",
           "refId": "A"
         }
@@ -140,7 +140,7 @@
     },
 
     {
-      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "thresholds"},
@@ -169,7 +169,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state_code\")\n  |> group(columns: [\"host\"])\n  |> last()\n  |> filter(fn: (r) => r._value >= 3)\n  |> group()\n  |> count()",
           "refId": "A"
         }
@@ -187,7 +187,7 @@
     },
 
     {
-      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
       "fieldConfig": {
         "defaults": {
           "color": {"mode": "thresholds"},
@@ -243,7 +243,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state_code\")\n  |> group(columns: [\"host\", \"vm_id\"])\n  |> last()\n  |> group()",
           "refId": "A"
         }
@@ -261,7 +261,7 @@
     },
 
     {
-      "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+      "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -314,7 +314,7 @@
       },
       "targets": [
         {
-          "datasource": {"type": "influxdb", "uid": "${DS_INFLUXDB-PQC}"},
+          "datasource": {"type": "influxdb", "uid": "influxdb-pqc"},
           "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -2m)\n  |> filter(fn: (r) => r._measurement == \"vm_heartbeat\" and r._field == \"state\")\n  |> group(columns: [\"host\", \"vm_id\"])\n  |> last()\n  |> group()\n  |> keep(columns: [\"_time\", \"host\", \"vm_id\", \"_value\"])",
           "refId": "A"
         }
