@@ -94,12 +94,34 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate dashboard JSON
         run: |
-          for f in grafana/provisioning/dashboards/*.json; do
-            python3 -m json.tool "$f" > /dev/null && echo "OK: $f"
-          done
+          python3 - <<'EOF'
+          import json, glob, sys
+          files = sorted(glob.glob("grafana/provisioning/dashboards/*.json"))
+          if not files:
+              print("ERREUR: aucun dashboard JSON trouve", file=sys.stderr)
+              sys.exit(1)
+          for f in files:
+              try:
+                  json.load(open(f))
+                  print(f"OK: {f}")
+              except json.JSONDecodeError as e:
+                  print(f"FAIL: {f}: {e}", file=sys.stderr)
+                  sys.exit(1)
+          EOF
       - name: Validate provisioning YAML
         run: |
           pip install pyyaml --quiet
-          for f in grafana/provisioning/**/*.yml; do
-            python3 -c "import yaml, sys; yaml.safe_load(open('$f'))" && echo "OK: $f"
-          done
+          python3 - <<'EOF'
+          import yaml, glob, sys
+          files = sorted(glob.glob("grafana/provisioning/**/*.yml", recursive=True))
+          if not files:
+              print("ERREUR: aucun fichier YAML de provisioning trouve", file=sys.stderr)
+              sys.exit(1)
+          for f in files:
+              try:
+                  yaml.safe_load(open(f))
+                  print(f"OK: {f}")
+              except yaml.YAMLError as e:
+                  print(f"FAIL: {f}: {e}", file=sys.stderr)
+                  sys.exit(1)
+          EOF
