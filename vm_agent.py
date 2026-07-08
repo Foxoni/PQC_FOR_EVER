@@ -301,19 +301,25 @@ class VMAgent:
         else:
             _ok("openssl:oqs-provider", "non requis (mode classic)")
 
-        # — Droits tshark (root ou CAP_NET_RAW) —
+        # — Droits tshark (root ou CAP_NET_RAW sur tshark ou dumpcap) —
         if shutil.which("tshark"):
             if os.geteuid() == 0:
                 _ok("droits:tshark", "root")
             else:
                 try:
-                    tshark_bin = shutil.which("tshark")
-                    r = subprocess.run(
-                        ["getcap", tshark_bin],
-                        capture_output=True, text=True, timeout=3
-                    )
-                    if "cap_net_raw" in r.stdout:
-                        _ok("droits:tshark", "CAP_NET_RAW présent")
+                    cap_found = False
+                    for binary in [shutil.which("tshark"), shutil.which("dumpcap")]:
+                        if not binary:
+                            continue
+                        r = subprocess.run(
+                            ["getcap", binary],
+                            capture_output=True, text=True, timeout=3
+                        )
+                        if "cap_net_raw" in r.stdout:
+                            cap_found = True
+                            break
+                    if cap_found:
+                        _ok("droits:tshark", "CAP_NET_RAW présent (dumpcap)")
                     else:
                         _warn("droits:tshark",
                               "ni root ni CAP_NET_RAW — tshark ne pourra pas capturer")
