@@ -108,7 +108,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
-          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"traffic\" and r.run_id == \"${run_id}\" and r._field == \"throughput_mbps\")\n  |> group(columns: [\"vm\", \"profile\"])",
+          "query": "union(\n  tables: [\n    from(bucket: \"pqc_bench\") |> range(start: -1h) |> filter(fn: (r) => r._measurement == \"traffic\" and r.run_id == \"${run_id}\" and r._field == \"throughput_mbps\"),\n    from(bucket: \"pqc_bench\") |> range(start: -1h) |> filter(fn: (r) => r._measurement == \"event\" and r.run_id == \"${run_id}\" and r._field == \"throughput_mbps\")\n  ]\n)\n|> group(columns: [\"vm\", \"profile\"])",
           "refId": "A"
         }
       ],
