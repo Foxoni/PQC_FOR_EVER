@@ -107,11 +107,16 @@ def _udp_receiver(udp_port: int) -> None:
     global _udp_sock
     _udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     _udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        # 4 MB pour absorber les rafales voip simultanees (necessite root ou rmem_max suffisant)
-        _udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-    except OSError:
-        pass  # systeme limite le buffer, on continue avec la valeur par defaut
+    # Forcer 8 MB de buffer UDP (SO_RCVBUFFORCE ignore rmem_max, nécessite root)
+    for opt in (socket.SO_RCVBUFFORCE if hasattr(socket, "SO_RCVBUFFORCE") else None,
+                socket.SO_RCVBUF):
+        if opt is None:
+            continue
+        try:
+            _udp_sock.setsockopt(socket.SOL_SOCKET, opt, 8 * 1024 * 1024)
+            break
+        except OSError:
+            pass
     try:
         _udp_sock.bind(("0.0.0.0", udp_port))
     except OSError as e:
@@ -244,7 +249,7 @@ def _handle_udp_session(conn: socket.socket, ttype: str,
                          duration: float, sid: int) -> None:
     bps = {
         "voip":   8_000_000 / 8,   # 8 Mbps bidir (visioconf 4K realiste)
-        "jitter": 1_000_000 / 8,
+        "jitter": 200_000 / 8,
     }.get(ttype, 1_000_000 / 8)
 
     ses = _UdpSession(sid, duration, bps)

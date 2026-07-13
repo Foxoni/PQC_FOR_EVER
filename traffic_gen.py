@@ -295,7 +295,7 @@ def _client_voip(target: str, duration: int) -> dict:
 # =============================================================================
 def cmd_jitter(target: str, duration: int, outfile: str) -> None:
     sid     = random.randint(1, 0x7FFFFFFF)
-    bps     = 1_000_000 / 8      # bytes/s
+    bps     = 200_000 / 8        # bytes/s — 200 kbps suffit pour jitter/perte
     chunk   = 200
     payload = os.urandom(chunk - _HDR.size)
     stop    = threading.Event()

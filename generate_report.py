@@ -387,6 +387,7 @@ def generate(master_paths, output=None):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PQC Bench — {title}</title>
 <style>{_CSS}</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 <button class="btn" onclick="var r=document.documentElement,t=r.getAttribute('data-theme')||'auto';r.setAttribute('data-theme',t==='dark'?'light':'dark')">☀ / 🌙</button>
@@ -415,7 +416,6 @@ def generate(master_paths, output=None):
 <h2>Résumé par VM</h2>
 {_table(all_master)}
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </body>
 </html>"""
 
