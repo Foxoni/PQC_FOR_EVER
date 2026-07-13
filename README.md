@@ -130,7 +130,7 @@ sudo apt install -y hping3 tshark fping
 
 | Outil | Metriques activees | Droits requis |
 | --- | --- | --- |
-| `hping3` | `TCP_connect_ms`, `Ping_p99_ms` | aucun |
+| `hping3` | `TCP_connect_ms` | aucun |
 | `tshark` | `Fragmentation_pct`, `Handshake_paquets`, `Handshake_octets` | **root** (CAP_NET_RAW) |
 | `fping` | fallback si hping3 absent | aucun |
 | `curl` | `TTFB_ms`, push InfluxDB | aucun |
@@ -556,6 +556,37 @@ extrait les lignes `GLOBAL_MOY` de tous les master CSV pour comparer les modes c
 
 ---
 
+## Rapport HTML standalone (generate_report.py)
+
+Genere un rapport HTML interactif depuis les CSV, utilisable **sans Grafana** (connexion internet
+requise uniquement pour Chart.js).
+
+```bash
+# Un seul run
+python3 generate_report.py results/master_hybrid-full_14.csv
+
+# Plusieurs runs (comparaison)
+python3 generate_report.py results/master_*.csv
+
+# Fichier de sortie personnalise
+python3 generate_report.py results/master_hybrid-full_14.csv --output mon_rapport.html
+```
+
+Le rapport est genere dans `results/report_<timestamp>.html` par defaut et contient :
+
+- **Tuiles de synthese** : mode, profil WAN, nombre de VMs, handshake moyen, debit moyen
+- **Graphes handshake TLS** : bar chart par profil + courbe chronologique (si CSV bruts disponibles)
+- **Graphes debit** : idem
+- **Graphe jitter UDP** : filtré sur les profils voip/stream
+- **Table de résumé** : toutes les lignes du master CSV
+- **Thème clair/sombre** : bascule via le bouton en haut a droite, suit `prefers-color-scheme`
+
+> Les graphes chronologiques et par profil necessitent les **CSV bruts** (`raw_<ip>_<ts>.csv`)
+> produits par la commande `results` de `server_cli.py`. Sans eux, seule la table de synthese
+> est affichee.
+
+---
+
 ## Modes de chiffrement
 
 Selection via `--mode <MODE>` (voir aussi `./pqc_bench.sh --list-modes`) :
@@ -723,9 +754,8 @@ RUN_ID=hybrid-full_14                  # normalement assigne via --run-id par se
 | `Retransmissions_pct` | Taux de retransmissions TCP | — |
 | `Taille_cle_octets` | Taille de la cle privee (octets) | — |
 | `Taille_cert_octets` | Taille du certificat (octets) | — |
-| `Ping_moy_ms` / `min` / `max` / `p99` | RTT ICMP pendant le trafic | ping, hping3 |
+| `RTT_moy_ms` / `min` / `max` / `p99` | RTT TCP mesuré par `ss` sur les connexions existantes | kernel (ss) |
 | `Jitter_ms` | Variation de latence UDP — voip/stream uniquement, -1 sinon | traffic_server |
-| `Packet_loss_pct` | Taux de perte global (ICMP) | ping |
 | `Packet_loss_UDP_pct` | Taux de perte UDP — voip/stream uniquement, -1 sinon | traffic_server |
 | `Fragmentation_pct` | % de paquets fragmentes pendant le handshake TLS | tshark + sudo |
 | `Handshake_paquets` | Nombre de paquets echanges pendant le handshake | tshark + sudo |
@@ -747,9 +777,8 @@ RUN_ID=hybrid-full_14                  # normalement assigne via --run-id par se
 | `CPU_moy_pct` | CPU moyen (VM pendant le test, ou serveur via _SrvMonitor) |
 | `RAM_moy_Mo` | RAM moyenne |
 | `Retransmissions_moy_pct` | Taux de retransmissions moyen |
-| `Ping_moy_ms` / `min` / `max` / `Ping_p99_moy_ms` | Statistiques RTT ICMP |
+| `RTT_moy_ms` / `min` / `max` / `RTT_p99_moy_ms` | Statistiques RTT TCP (ss) agrégées |
 | `Jitter_moy_ms` | Jitter UDP moyen (voip/stream uniquement) |
-| `Packet_loss_moy_pct` | Perte paquets globale moyenne |
 | `Packet_loss_UDP_moy_pct` | Perte paquets UDP moyenne (voip/stream uniquement) |
 | `Fragmentation_moy_pct` | % de fragmentation moyen sur le handshake |
 | `Handshake_paquets_moy` | Nombre moyen de paquets par handshake |

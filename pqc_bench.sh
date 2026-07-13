@@ -89,9 +89,9 @@ declare -A WAN_LOSS=(   [fr]="0.05%"  [eu]="0.1%"   [us]="0.2%"  )
 # =============================================================================
 # MÉTRIQUES RÉSEAU — initialisées à -1 (convention "non mesuré")
 # =============================================================================
-NET_PING_MOY=-1; NET_PING_MIN=-1; NET_PING_MAX=-1; NET_PING_P99=-1
+NET_RTT_MOY=-1; NET_RTT_MIN=-1; NET_RTT_MAX=-1; NET_RTT_P99=-1
 NET_JITTER=-1
-NET_LOSS_PCT=-1; NET_LOSS_UDP_PCT=-1
+NET_LOSS_UDP_PCT=-1
 HS_PKTS=-1; HS_BYTES=-1; HS_FRAG_PCT=-1
 TCP_CONNECT_MS=-1; TTFB_MS=-1
 CONN_ERRORS=0
@@ -101,7 +101,7 @@ CAN_HPING3=false; CAN_FPING=false; CAN_TSHARK=false
 CAN_CURL=false; CAN_CAPTURE=false
 
 # PIDs et fichiers temporaires des mesures en arrière-plan
-_PING_PID=0; _PING_FILE=""
+_RTT_PID=0; _RTT_FILE=""
 _JITTER_PID=0; _JITTER_FILE=""
 _TSHARK_PID=0; _TSHARK_PCAP=""
 
@@ -279,7 +279,8 @@ check_deps() {
         || log_warn "traffic_server.py introuvable dans $SCRIPT_DIR — trafic indisponible"
 
     # Outils optionnels — absence = métriques réseau partielles (-1 dans le CSV)
-    has_cmd hping3  || log_warn "hping3 absent  → TCP_connect_ms et Ping_p99_ms indisponibles"
+    has_cmd hping3  || log_warn "hping3 absent  → TCP_connect_ms indisponible (fallback /dev/tcp)"
+    has_cmd ss      || log_warn "ss absent      → métriques RTT TCP indisponibles"
     has_cmd tshark  || log_warn "tshark absent  → métriques handshake réseau indisponibles (Fragmentation_pct, Handshake_paquets, Handshake_octets)"
     has_cmd fping   || true   # fallback silencieux vers hping3 / ping
 
@@ -315,56 +316,97 @@ check_network_caps() {
 # MESURES RÉSEAU EN ARRIÈRE-PLAN
 # =============================================================================
 
-# Lance ping en continu pendant un événement de trafic.
-# Appeler net_ping_start avant l'événement, net_ping_stop après.
-net_ping_start() {
-    local target="$1" duration="${2:-60}"
-    if ! has_cmd ping; then
-        log_warn "ping absent — métriques RTT indisponibles"
-        _PING_PID=0; return
+# Mesure le RTT TCP via ss (kernel) sur les connexions actives vers la cible.
+# Échantillonne toutes les 500ms ; les points sont poussés à InfluxDB à l'arrêt.
+tcp_rtt_start() {
+    local target="$1"
+    if ! has_cmd ss; then
+        log_warn "ss absent — métriques RTT TCP indisponibles"
+        _RTT_PID=0; return
     fi
-    _PING_FILE="/tmp/pqc_ping_$$.txt"
-    local count=$(( duration * 2 + 30 ))   # 2 pings/s + marge
-    ping -c "$count" -i 0.5 "$target" > "$_PING_FILE" 2>&1 &
-    _PING_PID=$!
-    sleep 0.2
-    if ! kill -0 "$_PING_PID" 2>/dev/null; then
-        log_warn "ping vers $target n'a pas démarré (hôte injoignable ?)"
-        _PING_PID=0
-    fi
+    _RTT_FILE="/tmp/pqc_rtt_$$.txt"
+    (
+        while true; do
+            local ts
+            ts=$(date +%s)
+            ss --tcp --info dst "$target" 2>/dev/null \
+                | grep -oE "rtt:[0-9.]+" | cut -d: -f2 \
+                | while IFS= read -r rtt; do echo "$ts $rtt"; done
+            sleep 0.5
+        done
+    ) > "$_RTT_FILE" 2>/dev/null &
+    _RTT_PID=$!
+    sleep 0.1
+    kill -0 "$_RTT_PID" 2>/dev/null || _RTT_PID=0
 }
 
-net_ping_stop() {
-    # SIGINT (pas SIGTERM) pour que ping imprime son résumé statistique avant de quitter
-    [[ "$_PING_PID" -gt 0 ]] && { kill -INT "$_PING_PID" 2>/dev/null; wait "$_PING_PID" 2>/dev/null || true; }
-    _PING_PID=0
-    if [[ ! -f "$_PING_FILE" ]]; then
-        NET_PING_MOY=-1; NET_PING_MIN=-1; NET_PING_MAX=-1; NET_PING_P99=-1; NET_LOSS_PCT=-1
-        return
+tcp_rtt_stop() {
+    [[ "$_RTT_PID" -gt 0 ]] && { kill "$_RTT_PID" 2>/dev/null; wait "$_RTT_PID" 2>/dev/null || true; }
+    _RTT_PID=0
+    if [[ ! -f "$_RTT_FILE" ]] || [[ ! -s "$_RTT_FILE" ]]; then
+        NET_RTT_MOY=-1; NET_RTT_MIN=-1; NET_RTT_MAX=-1; NET_RTT_P99=-1
+        rm -f "$_RTT_FILE"; _RTT_FILE=""; return
     fi
-    # min/avg/max depuis la ligne "rtt min/avg/max/mdev"
-    local stats
-    stats=$(grep -E "^rtt|^round-trip" "$_PING_FILE" | grep -oE "[0-9]+\.[0-9]+/[0-9]+\.[0-9]+/[0-9]+\.[0-9]+" || true)
-    if [[ -n "$stats" ]]; then
-        NET_PING_MIN=$(echo "$stats" | cut -d'/' -f1)
-        NET_PING_MOY=$(echo "$stats" | cut -d'/' -f2)
-        NET_PING_MAX=$(echo "$stats" | cut -d'/' -f3)
-        # P99 calculé sur les RTT individuels
-        NET_PING_P99=$(grep -oE "time=[0-9.]+" "$_PING_FILE" | cut -d= -f2 \
-            | python3 -c "
-import sys, statistics
-vals = sorted(float(l) for l in sys.stdin if l.strip())
-if not vals: print(-1)
-else:
-    idx = max(0, int(len(vals) * 0.99) - 1)
-    print(round(vals[idx], 2))" 2>/dev/null || echo -1)
-    else
-        NET_PING_MOY=-1; NET_PING_MIN=-1; NET_PING_MAX=-1; NET_PING_P99=-1
-    fi
-    local loss
-    loss=$(grep -oE "[0-9.]+% packet loss" "$_PING_FILE" | grep -oE "[0-9.]+" || true)
-    NET_LOSS_PCT="${loss:--1}"
-    rm -f "$_PING_FILE"; _PING_FILE=""
+
+    read -r NET_RTT_MIN NET_RTT_MOY NET_RTT_MAX NET_RTT_P99 < <(
+        python3 - "$_RTT_FILE" "$RUN_ID" "$(local_ip)" "$MODE" "${WAN_PROFILE:-?}" <<'PYEOF'
+import sys, statistics, os
+try:
+    import urllib.request as _ur
+except ImportError:
+    _ur = None
+
+rtt_file = sys.argv[1]
+run_id   = sys.argv[2]
+vm       = sys.argv[3]
+mode     = sys.argv[4]
+wan      = sys.argv[5]
+url = os.environ.get("INFLUX_URL", "")
+org = os.environ.get("INFLUX_ORG", "pqc")
+bkt = os.environ.get("INFLUX_BUCKET", "pqc_bench")
+tok = os.environ.get("INFLUX_TOKEN", "")
+
+samples = []
+try:
+    with open(rtt_file) as f:
+        for line in f:
+            p = line.strip().split()
+            if len(p) == 2:
+                try:
+                    samples.append((int(p[0]), float(p[1])))
+                except ValueError:
+                    pass
+except Exception:
+    pass
+
+if not samples:
+    print("-1 -1 -1 -1")
+    sys.exit(0)
+
+# Pousse chaque point dans InfluxDB pour la courbe temporelle dans Grafana
+if url and run_id and tok and _ur:
+    payload = "\n".join(
+        f"rtt,run_id={run_id},vm={vm},mode={mode},wan={wan} rtt_ms={rtt} {ts}"
+        for ts, rtt in samples
+    )
+    try:
+        req = _ur.Request(
+            f"{url}/api/v2/write?org={org}&bucket={bkt}&precision=s",
+            data=payload.encode(),
+            headers={"Authorization": f"Token {tok}", "Content-Type": "text/plain"},
+            method="POST",
+        )
+        _ur.urlopen(req, timeout=5)
+    except Exception:
+        pass
+
+vals = sorted(v for _, v in samples)
+p99  = vals[max(0, int(len(vals) * 0.99) - 1)]
+print(round(min(vals), 2), round(statistics.mean(vals), 2), round(max(vals), 2), round(p99, 2))
+PYEOF
+    )
+
+    rm -f "$_RTT_FILE"; _RTT_FILE=""
 }
 
 # Lance une mesure jitter UDP en arrière-plan via traffic_server.py.
@@ -809,12 +851,12 @@ collect_metrics() {
     log_info "Écriture → $out_file"
 
     {
-        echo "Horodatage,VM_IP,Serveur_IP,Mode,Profil,Suite_chiffrement,AES_bits,\
+        echo "Horodatage,VM_IP,Serveur_IP,Mode,WAN,Profil,Suite_chiffrement,AES_bits,\
 Latence_min_ms,Latence_moy_ms,Latence_max_ms,Latence_p99_ms,\
 Debit_Mbps,Handshake_moy_ms,Handshake_p99_ms,\
 CPU_moy_pct,RAM_moy_Mo,Retransmissions_pct,Taille_cle_octets,Taille_cert_octets,\
-Ping_moy_ms,Ping_min_ms,Ping_max_ms,Ping_p99_ms,\
-Jitter_ms,Packet_loss_pct,Packet_loss_UDP_pct,\
+RTT_moy_ms,RTT_min_ms,RTT_max_ms,RTT_p99_ms,\
+Jitter_ms,Packet_loss_UDP_pct,\
 Fragmentation_pct,Handshake_paquets,Handshake_octets,\
 TCP_connect_ms,TTFB_ms,Connexions_echec"
 
@@ -835,12 +877,12 @@ TCP_connect_ms,TTFB_ms,Connexions_echec"
                 *)           jitter_val=-1;            loss_udp_val=-1 ;;
             esac
 
-            echo "${ts},${vm_ip},${target},${mode},${profile},${cipher},${aes_bits},\
+            echo "${ts},${vm_ip},${target},${mode},${WAN_PROFILE},${profile},${cipher},${aes_bits},\
 ${HS_MIN},${HS_AVG},${HS_MAX},${HS_P99},\
 ${throughput},${HS_AVG},${HS_P99},\
 ${CPU_AVG},${RAM_AVG},${retransmit},${KEY_SIZE},${CERT_SIZE},\
-${NET_PING_MOY},${NET_PING_MIN},${NET_PING_MAX},${NET_PING_P99},\
-${jitter_val},${NET_LOSS_PCT},${loss_udp_val},\
+${NET_RTT_MOY},${NET_RTT_MIN},${NET_RTT_MAX},${NET_RTT_P99},\
+${jitter_val},${loss_udp_val},\
 ${HS_FRAG_PCT},${HS_PKTS},${HS_BYTES},\
 ${TCP_CONNECT_MS},${TTFB_MS},${CONN_ERRORS}"
 
@@ -878,8 +920,8 @@ collect_preset_metrics() {
     python3 - "$preset_json" "$ts" "$vm_ip" "$target" \
               "$mode" "$cipher" "$aes_bits" \
               "$CPU_AVG" "$RAM_AVG" "$KEY_SIZE" "$CERT_SIZE" \
-              "$NET_PING_MOY" "$NET_PING_MIN" "$NET_PING_MAX" "$NET_PING_P99" \
-              "$NET_JITTER" "$NET_LOSS_PCT" "$NET_LOSS_UDP_PCT" \
+              "$NET_RTT_MOY" "$NET_RTT_MIN" "$NET_RTT_MAX" "$NET_RTT_P99" \
+              "$NET_JITTER" "$NET_LOSS_UDP_PCT" \
               "$HS_FRAG_PCT" "$HS_PKTS" "$HS_BYTES" \
               "$TCP_CONNECT_MS" "$TTFB_MS" "$CONN_ERRORS" \
               "$out_file" <<'EOF'
@@ -899,11 +941,11 @@ ts, vm_ip, target = sys.argv[2], sys.argv[3], sys.argv[4]
 mode, cipher, aes_bits = sys.argv[5], sys.argv[6], sys.argv[7]
 cpu, ram = sys.argv[8], sys.argv[9]
 key_sz, cert_sz = sys.argv[10], sys.argv[11]
-ping_moy, ping_min, ping_max, ping_p99 = sys.argv[12], sys.argv[13], sys.argv[14], sys.argv[15]
-net_jitter, loss_pct, loss_udp_pct = sys.argv[16], sys.argv[17], sys.argv[18]
-frag_pct, hs_pkts, hs_bytes = sys.argv[19], sys.argv[20], sys.argv[21]
-tcp_connect, ttfb, conn_err = sys.argv[22], sys.argv[23], sys.argv[24]
-outfile = sys.argv[25]
+rtt_moy, rtt_min, rtt_max, rtt_p99 = sys.argv[12], sys.argv[13], sys.argv[14], sys.argv[15]
+net_jitter, loss_udp_pct = sys.argv[16], sys.argv[17]
+frag_pct, hs_pkts, hs_bytes = sys.argv[18], sys.argv[19], sys.argv[20]
+tcp_connect, ttfb, conn_err = sys.argv[21], sys.argv[22], sys.argv[23]
+outfile = sys.argv[24]
 
 run_id     = os.environ.get("RUN_ID", "")
 influx_url = os.environ.get("INFLUX_URL", "")
@@ -928,14 +970,14 @@ def _influx_push(line):
 UDP_PROFILES = {"voip", "stream"}
 
 fields = [
-    "Horodatage","VM_IP","Serveur_IP","Mode","Type_test","Profil","Libelle",
+    "Horodatage","VM_IP","Serveur_IP","Mode","WAN","Type_test","Profil","Libelle",
     "Suite_chiffrement","AES_bits",
     "Delai_planifie_s","Duree_reelle_s",
     "Handshake_ms","Debit_Mbps",
     "CPU_moy_pct","RAM_moy_Mo","Retransmissions_pct",
     "Taille_cle_octets","Taille_cert_octets",
-    "Ping_moy_ms","Ping_min_ms","Ping_max_ms","Ping_p99_ms",
-    "Jitter_ms","Packet_loss_pct","Packet_loss_UDP_pct",
+    "RTT_moy_ms","RTT_min_ms","RTT_max_ms","RTT_p99_ms",
+    "Jitter_ms","Packet_loss_UDP_pct",
     "Fragmentation_pct","Handshake_paquets","Handshake_octets",
     "TCP_connect_ms","TTFB_ms","Connexions_echec",
 ]
@@ -952,7 +994,8 @@ try:
             rtr    = e.get("retransmit_pct", 0)
             w.writerow({
                 "Horodatage": ts, "VM_IP": vm_ip, "Serveur_IP": target,
-                "Mode": mode, "Type_test": data.get("schedule", "?"),
+                "Mode": mode, "WAN": os.environ.get("WAN_PROFILE", "?"),
+                "Type_test": data.get("schedule", "?"),
                 "Profil": profil, "Libelle": e.get("label", ""),
                 "Suite_chiffrement": cipher, "AES_bits": aes_bits,
                 "Delai_planifie_s": e.get("planned_delay_s", 0),
@@ -962,10 +1005,9 @@ try:
                 "CPU_moy_pct": cpu, "RAM_moy_Mo": ram,
                 "Retransmissions_pct": rtr,
                 "Taille_cle_octets": key_sz, "Taille_cert_octets": cert_sz,
-                "Ping_moy_ms": ping_moy, "Ping_min_ms": ping_min,
-                "Ping_max_ms": ping_max, "Ping_p99_ms": ping_p99,
+                "RTT_moy_ms": rtt_moy, "RTT_min_ms": rtt_min,
+                "RTT_max_ms": rtt_max, "RTT_p99_ms": rtt_p99,
                 "Jitter_ms":           net_jitter if is_udp else -1,
-                "Packet_loss_pct":     loss_pct,
                 "Packet_loss_UDP_pct": loss_udp_pct if is_udp else -1,
                 "Fragmentation_pct":   frag_pct,
                 "Handshake_paquets":   hs_pkts,
@@ -977,7 +1019,7 @@ try:
             now = int(time.time())
             _influx_push(
                 f"event,run_id={run_id},vm={vm_ip},mode={mode},"
-                f"wan={os.environ.get('WAN_PROFILE', 'eu')},profile={profil} "
+                f"wan={os.environ.get('WAN_PROFILE', '?')},profile={profil} "
                 f"hs_ms={hs_ms},throughput_mbps={dbt},retransmit_pct={rtr} {now}"
             )
             if is_udp:
@@ -1220,7 +1262,7 @@ $(date +%s)"
 
         # Monitoring CPU/RAM + mesures réseau en parallèle pendant le preset
         start_monitor
-        net_ping_start   "$TARGET" 70
+        tcp_rtt_start   "$TARGET" 70
         net_jitter_start "$TARGET" 70
 
         log_info "Exécution preset $PRESET (60s, événements staggerés)..."
@@ -1238,7 +1280,7 @@ $(date +%s)"
         fi
 
         net_jitter_stop
-        net_ping_stop
+        tcp_rtt_stop
         stop_monitor
 
         if [[ ! -f "$preset_json" ]]; then
@@ -1264,7 +1306,7 @@ hs_min=${HS_MIN},hs_avg=${HS_AVG},hs_max=${HS_MAX},hs_p99=${HS_P99},\
 tcp_connect_ms=${TCP_CONNECT_MS},ttfb_ms=${TTFB_MS},conn_errors=${CONN_ERRORS}i \
 $(date +%s)"
         start_monitor
-        net_ping_start   "$TARGET" $(( DURATION + 15 ))
+        tcp_rtt_start   "$TARGET" $(( DURATION + 15 ))
         net_jitter_start "$TARGET" $(( DURATION + 15 ))
 
         log_info "Démarrage des profils de trafic (en parallèle) :"
@@ -1291,7 +1333,7 @@ $(date +%s)"
 
         wait_traffic
         net_jitter_stop
-        net_ping_stop
+        tcp_rtt_stop
         stop_monitor
         collect_metrics "$MODE" "$PROFILES" "$TARGET"
     fi
@@ -1316,7 +1358,7 @@ cmd_random() {
         && log_info "Durée: ${DURATION}s" \
         || log_info "Durée: infinie — Ctrl+C pour arrêter"
 
-    trap 'rm -rf "$CERT_DIR"; stop_monitor; net_ping_stop; net_jitter_stop' EXIT INT TERM
+    trap 'rm -rf "$CERT_DIR"; stop_monitor; tcp_rtt_stop; net_jitter_stop' EXIT INT TERM
     crypto_gen_certs "$MODE"
 
     # Mesure handshake bulk en amont (baseline statistique propre)
@@ -1324,7 +1366,7 @@ cmd_random() {
 
     start_monitor
     local random_dur=$(( DURATION > 0 ? DURATION + 15 : 3600 ))
-    net_ping_start   "$TARGET" "$random_dur"
+    tcp_rtt_start   "$TARGET" "$random_dur"
     net_jitter_start "$TARGET" "$random_dur"
 
     local out_json=""
@@ -1341,7 +1383,7 @@ cmd_random() {
         ${out_json:+--output "$out_json"} || true
 
     net_jitter_stop
-    net_ping_stop
+    tcp_rtt_stop
     stop_monitor
 
     if [[ -n "$out_json" && -f "$out_json" ]]; then

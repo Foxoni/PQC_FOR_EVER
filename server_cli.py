@@ -780,9 +780,9 @@ class ServerCLI:
         "Handshake_moy_ms", "Handshake_min_ms", "Handshake_max_ms",
         "Debit_moy_Mbps", "Debit_min_Mbps", "Debit_max_Mbps",
         "CPU_moy_pct", "RAM_moy_Mo", "Retransmissions_moy_pct",
-        "Ping_moy_ms", "Ping_min_ms", "Ping_max_ms", "Ping_p99_moy_ms",
+        "RTT_moy_ms", "RTT_min_ms", "RTT_max_ms", "RTT_p99_moy_ms",
         "Jitter_moy_ms",
-        "Packet_loss_moy_pct", "Packet_loss_UDP_moy_pct",
+        "Packet_loss_UDP_moy_pct",
         "Fragmentation_moy_pct",
         "Handshake_paquets_moy", "Handshake_octets_moy",
         "TCP_connect_moy_ms", "TTFB_moy_ms",
@@ -819,12 +819,11 @@ class ServerCLI:
         cpu  = _col("CPU_moy_pct",  "cpu_avg_pct")
         ram  = _col("RAM_moy_Mo",   "ram_avg_mb")
         rtr  = _col("Retransmissions_pct", "retransmit_pct")
-        ping_moy  = _col("Ping_moy_ms")
-        ping_min  = _col("Ping_min_ms")
-        ping_max  = _col("Ping_max_ms")
-        ping_p99  = _col("Ping_p99_ms")
+        rtt_moy   = _col("RTT_moy_ms")
+        rtt_min   = _col("RTT_min_ms")
+        rtt_max   = _col("RTT_max_ms")
+        rtt_p99   = _col("RTT_p99_ms")
         jitter    = _col("Jitter_ms")
-        loss      = _col("Packet_loss_pct")
         loss_udp  = _col("Packet_loss_UDP_pct")
         frag      = _col("Fragmentation_pct")
         hs_pkts   = _col("Handshake_paquets")
@@ -849,12 +848,11 @@ class ServerCLI:
             "CPU_moy_pct":   avg(cpu),
             "RAM_moy_Mo":    avg(ram),
             "Retransmissions_moy_pct": avg(rtr),
-            "Ping_moy_ms":             avg(ping_moy),
-            "Ping_min_ms":             mn(ping_min),
-            "Ping_max_ms":             mx(ping_max),
-            "Ping_p99_moy_ms":         avg(ping_p99),
+            "RTT_moy_ms":              avg(rtt_moy),
+            "RTT_min_ms":              mn(rtt_min),
+            "RTT_max_ms":              mx(rtt_max),
+            "RTT_p99_moy_ms":          avg(rtt_p99),
             "Jitter_moy_ms":           avg(jitter),
-            "Packet_loss_moy_pct":     avg(loss),
             "Packet_loss_UDP_moy_pct": avg(loss_udp),
             "Fragmentation_moy_pct":   avg(frag),
             "Handshake_paquets_moy":   avg(hs_pkts),
@@ -871,9 +869,9 @@ class ServerCLI:
             "Handshake_moy_ms", "Handshake_min_ms", "Handshake_max_ms",
             "Debit_moy_Mbps", "Debit_min_Mbps", "Debit_max_Mbps",
             "CPU_moy_pct", "RAM_moy_Mo", "Retransmissions_moy_pct",
-            "Ping_moy_ms", "Ping_min_ms", "Ping_max_ms", "Ping_p99_moy_ms",
+            "RTT_moy_ms", "RTT_min_ms", "RTT_max_ms", "RTT_p99_moy_ms",
             "Jitter_moy_ms",
-            "Packet_loss_moy_pct", "Packet_loss_UDP_moy_pct",
+            "Packet_loss_UDP_moy_pct",
             "Fragmentation_moy_pct",
             "Handshake_paquets_moy", "Handshake_octets_moy",
             "TCP_connect_moy_ms", "TTFB_moy_ms",
@@ -1005,7 +1003,10 @@ class ServerCLI:
         for ip, rows in sorted(vm_data.items()):
             s = self._summarise_vm_rows(rows)
             s["Source"] = ip
-            s["WAN"]    = self.vms[ip].config.get("wan_profile", "?")
+            # Préférer WAN depuis le CSV brut (persistant) ; fallback config mémoire
+            wan_csv = rows[0].get("WAN", "") if rows else ""
+            s["WAN"] = (wan_csv if wan_csv not in ("", "?", None)
+                        else self.vms[ip].config.get("wan_profile", "?"))
             master_rows.append(s)
             vm_summaries.append(s)
 

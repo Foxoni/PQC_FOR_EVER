@@ -21,14 +21,22 @@
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2 },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 8,
+            "spanNulls": false
+          },
           "unit": "ms"
         },
         "overrides": []
       },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
       "id": 1,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
@@ -99,7 +107,16 @@
     {
       "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
-        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 }, "unit": "Mbps" },
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 8,
+            "spanNulls": false
+          },
+          "unit": "Mbps"
+        },
         "overrides": []
       },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
@@ -118,7 +135,16 @@
     {
       "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
       "fieldConfig": {
-        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 }, "unit": "ms" },
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 8,
+            "spanNulls": false
+          },
+          "unit": "ms"
+        },
         "overrides": []
       },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
@@ -219,6 +245,71 @@
         }
       ],
       "title": "Serveur — CPU %",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "id": 103,
+      "title": "Qualité réseau — Ping & Perte",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 7,
+            "spanNulls": false
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "id": 10,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"rtt\" and r.run_id == \"${run_id}\" and r._field == \"rtt_ms\")\n  |> filter(fn: (r) => r._value >= 0)\n  |> group(columns: [\"vm\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "RTT TCP par VM (échantillons ss)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 7,
+            "spanNulls": false
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+      "id": 11,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"net_quality\" and r.run_id == \"${run_id}\" and r._field == \"loss_pct\")\n  |> filter(fn: (r) => r._value >= 0)\n  |> group(columns: [\"vm\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Packet loss % par VM",
       "type": "timeseries"
     }
   ],
