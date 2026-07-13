@@ -57,7 +57,14 @@ def load_master(path):
 
 
 def find_raw_csvs(master_path):
-    return sorted(Path(master_path).parent.glob("raw_*.csv"))
+    # master_hybrid-full_20.csv → run_id "hybrid-full_20"
+    stem   = Path(master_path).stem          # "master_hybrid-full_20"
+    run_id = stem[len("master_"):]           # "hybrid-full_20"
+    matches = sorted(Path(master_path).parent.glob(f"raw_*_{run_id}_*.csv"))
+    if not matches:
+        # fallback pour anciens raw sans run_id dans le nom
+        matches = sorted(Path(master_path).parent.glob("raw_*.csv"))
+    return matches
 
 
 def load_raw_rows(raw_paths):

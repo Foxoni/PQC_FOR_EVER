@@ -953,6 +953,15 @@ class ServerCLI:
         mode    = "unknown"
         wan     = "?"
 
+        # Calculer idx ici pour l'inclure dans les noms de raw et du master
+        # (même appel que plus bas — _next_master_index est idempotent tant qu'on n'écrit pas)
+        _mode_probe = next(
+            (self.vms[ip].config.get("mode", "unknown") for ip in sorted(self.vms)),
+            "unknown",
+        )
+        _idx_probe  = self._next_master_index(_mode_probe)
+        _run_tag    = f"{_mode_probe}_{_idx_probe}"
+
         print("Collecte des resultats...")
         for ip in sorted(self.vms):
             r = self._send(ip, {"cmd": "GET_RESULTS"}, timeout=15)
@@ -965,9 +974,9 @@ class ServerCLI:
             if not content:
                 print(f"  {ip}: CSV vide"); continue
 
-            # Sauvegarde individuelle avec timestamp pour ne pas ecraser
+            # Sauvegarde individuelle — run_tag permet de lier ce raw à son master
             ts_tag  = datetime.now().strftime("%Y%m%dT%H%M%S")
-            indiv   = RESULTS_DIR / f"raw_{ip.replace('.', '_')}_{ts_tag}.csv"
+            indiv   = RESULTS_DIR / f"raw_{ip.replace('.', '_')}_{_run_tag}_{ts_tag}.csv"
             try:
                 indiv.write_text(content)
             except OSError as exc:
