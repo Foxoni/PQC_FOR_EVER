@@ -356,8 +356,11 @@ tcp_rtt_stop() {
         rm -f "$_RTT_FILE"; _RTT_FILE=""; return
     fi
 
-    read -r NET_RTT_MIN NET_RTT_MOY NET_RTT_MAX NET_RTT_P99 < <(
-        python3 - "$_RTT_FILE" "$RUN_ID" "$(local_ip)" "$MODE" "${WAN_PROFILE:-?}" <<'PYEOF'
+    # Écrire le script Python dans un fichier temp pour éviter le bug bash
+    # combinant process substitution < <(...) et heredoc <<'EOF' simultanément
+    local _rtt_py="/tmp/pqc_rtt_proc_$$.py"
+    local _rtt_out="/tmp/pqc_rtt_out_$$.txt"
+    cat > "$_rtt_py" <<'PYEOF'
 import sys, statistics, os
 try:
     import urllib.request as _ur
@@ -391,7 +394,6 @@ if not samples:
     print("-1 -1 -1 -1")
     sys.exit(0)
 
-# Pousse chaque point dans InfluxDB pour la courbe temporelle dans Grafana
 if url and run_id and tok and _ur:
     payload = "\n".join(
         f"rtt,run_id={run_id},vm={vm},mode={mode},wan={wan} rtt_ms={rtt} {ts}"
@@ -412,9 +414,13 @@ vals = sorted(v for _, v in samples)
 p99  = vals[max(0, int(len(vals) * 0.99) - 1)]
 print(round(min(vals), 2), round(statistics.mean(vals), 2), round(max(vals), 2), round(p99, 2))
 PYEOF
-    )
 
-    rm -f "$_RTT_FILE"; _RTT_FILE=""
+    python3 "$_rtt_py" "$_RTT_FILE" "$RUN_ID" "$(local_ip)" "$MODE" "${WAN_PROFILE:-?}" \
+        > "$_rtt_out" 2>/dev/null
+    read -r NET_RTT_MIN NET_RTT_MOY NET_RTT_MAX NET_RTT_P99 < "$_rtt_out"
+
+    rm -f "$_RTT_FILE" "$_rtt_py" "$_rtt_out"
+    _RTT_FILE=""
 }
 
 # Lance une mesure jitter UDP en arrière-plan via traffic_server.py.
