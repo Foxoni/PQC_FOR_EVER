@@ -417,7 +417,7 @@ PYEOF
 
     python3 "$_rtt_py" "$_RTT_FILE" "$RUN_ID" "$(local_ip)" "$MODE" "${WAN_PROFILE:-?}" \
         > "$_rtt_out" 2>/dev/null
-    read -r NET_RTT_MIN NET_RTT_MOY NET_RTT_MAX NET_RTT_P99 < "$_rtt_out"
+    IFS=' ' read -r NET_RTT_MIN NET_RTT_MOY NET_RTT_MAX NET_RTT_P99 < "$_rtt_out"
 
     rm -f "$_RTT_FILE" "$_rtt_py" "$_rtt_out"
     _RTT_FILE=""
