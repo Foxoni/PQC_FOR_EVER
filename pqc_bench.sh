@@ -316,33 +316,34 @@ check_network_caps() {
 # MESURES RÉSEAU EN ARRIÈRE-PLAN
 # =============================================================================
 
-# Mesure le RTT TCP via ss (kernel) sur les connexions actives vers la cible.
-# Échantillonne toutes les 500ms ; les points sont poussés à InfluxDB à l'arrêt.
+# Mesure le RTT TCP via socket.connect() Python vers PORT_MARKER.
+# Pas de socket brut → pas besoin de root. Génère ~300 octets/s (négligeable).
+# Une mesure toutes les ~1s pendant la durée du test.
 tcp_rtt_start() {
     local target="$1"
-    if ! has_cmd ss; then
-        log_warn "ss absent — métriques RTT TCP indisponibles"
-        _RTT_PID=0; return
-    fi
     _RTT_FILE="/tmp/pqc_rtt_$$.txt"
-    # -t TCP  -i info (RTT kernel)  -n numeric  -a all states
-    # grep " rtt:" avec espace pour éviter rcv_rtt: et minrtt:
-    (
-        while true; do
-            ts=$(date +%s)
-            ss -tina 2>/dev/null \
-                | grep -F "$target" -A1 \
-                | grep -oE " rtt:[0-9.]+" \
-                | cut -d: -f2 \
-                | while IFS= read -r rtt; do echo "$ts $rtt"; done
-            sleep 0.5
-        done
-    ) > "$_RTT_FILE" 2>/dev/null &
+    python3 - "$target" "$PORT_MARKER" > "$_RTT_FILE" 2>/dev/null <<'RTTEOF' &
+import socket, time, sys
+target = sys.argv[1]
+port   = int(sys.argv[2])
+while True:
+    ts = int(time.time())
+    try:
+        t0 = time.monotonic()
+        s  = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2.0)
+        s.connect((target, port))
+        rtt = (time.monotonic() - t0) * 1000
+        s.close()
+        print(ts, round(rtt, 2), flush=True)
+    except Exception:
+        pass
+    time.sleep(0.5)
+RTTEOF
     _RTT_PID=$!
     sleep 0.3
-    # Vérifier que le processus tourne et capture quelque chose
     if ! kill -0 "$_RTT_PID" 2>/dev/null; then
-        log_warn "Sampler RTT n'a pas démarré"
+        log_warn "Sampler RTT n'a pas démarré (PORT_MARKER $PORT_MARKER inaccessible ?)"
         _RTT_PID=0
     fi
 }
