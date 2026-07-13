@@ -325,19 +325,26 @@ tcp_rtt_start() {
         _RTT_PID=0; return
     fi
     _RTT_FILE="/tmp/pqc_rtt_$$.txt"
+    # -t TCP  -i info (RTT kernel)  -n numeric  -a all states
+    # grep " rtt:" avec espace pour éviter rcv_rtt: et minrtt:
     (
         while true; do
-            local ts
             ts=$(date +%s)
-            ss --tcp --info dst "$target" 2>/dev/null \
-                | grep -oE "rtt:[0-9.]+" | cut -d: -f2 \
+            ss -tina 2>/dev/null \
+                | grep -F "$target" -A1 \
+                | grep -oE " rtt:[0-9.]+" \
+                | cut -d: -f2 \
                 | while IFS= read -r rtt; do echo "$ts $rtt"; done
             sleep 0.5
         done
     ) > "$_RTT_FILE" 2>/dev/null &
     _RTT_PID=$!
-    sleep 0.1
-    kill -0 "$_RTT_PID" 2>/dev/null || _RTT_PID=0
+    sleep 0.3
+    # Vérifier que le processus tourne et capture quelque chose
+    if ! kill -0 "$_RTT_PID" 2>/dev/null; then
+        log_warn "Sampler RTT n'a pas démarré"
+        _RTT_PID=0
+    fi
 }
 
 tcp_rtt_stop() {

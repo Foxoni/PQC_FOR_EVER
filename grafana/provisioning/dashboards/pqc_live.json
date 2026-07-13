@@ -40,7 +40,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb-pqc" },
-          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"handshake\" and r.run_id == \"${run_id}\")\n  |> filter(fn: (r) => r._field == \"hs_avg\" or r._field == \"hs_p99\" or r._field == \"hs_min\" or r._field == \"hs_max\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")",
+          "query": "from(bucket: \"pqc_bench\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"event\" and r.run_id == \"${run_id}\" and r._field == \"hs_ms\")\n  |> filter(fn: (r) => r._value > 0)\n  |> group(columns: [\"vm\"])",
           "refId": "A"
         }
       ],
