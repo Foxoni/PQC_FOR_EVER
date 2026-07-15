@@ -310,7 +310,8 @@ def cmd_jitter(target: str, duration: int, outfile: str) -> None:
         if not resp.get("ready"):
             raise RuntimeError("server not ready")
 
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp  = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _seq = [0]  # total réel envoyé, lu après join
 
         def _send() -> None:
             tokens = 0.0
@@ -332,6 +333,7 @@ def cmd_jitter(target: str, duration: int, outfile: str) -> None:
                     seq    += 1
                 else:
                     time.sleep(max(0.0, (chunk - tokens) / bps * 0.8))
+            _seq[0] = seq
 
         def _recv() -> None:
             udp.settimeout(1.0)
@@ -351,6 +353,12 @@ def cmd_jitter(target: str, duration: int, outfile: str) -> None:
         stop.set()
         t_s.join(timeout=3)
         t_r.join(timeout=3)
+
+        # Envoyer le total réel au serveur pour un calcul de perte précis
+        try:
+            ctrl.sendall((json.dumps({"total_sent": _seq[0]}) + "\n").encode())
+        except OSError:
+            pass
 
         result = json.loads(_recv_line(ctrl, timeout=15))
 

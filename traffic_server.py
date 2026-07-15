@@ -268,7 +268,23 @@ def _handle_udp_session(conn: socket.socket, ttype: str,
     with _ses_lock:
         _sessions.pop(sid, None)
 
-    _send_result(conn, ses.result)
+    # Lire le total réel envoyé par le client pour un calcul de perte précis
+    total_sent = 0
+    try:
+        msg = json.loads(_recv_line(conn, timeout=5.0))
+        total_sent = int(msg.get("total_sent", 0))
+    except Exception:
+        pass
+
+    result = ses.result
+    if total_sent > 0:
+        with ses.lock:
+            rx = ses.rx_pkts
+        lost = round(max(0.0, (1 - rx / total_sent) * 100), 3)
+        result = dict(result)
+        result["lost_pct"] = lost
+
+    _send_result(conn, result)
 
 
 # =============================================================================
