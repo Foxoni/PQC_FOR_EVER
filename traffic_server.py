@@ -271,6 +271,10 @@ def _handle_udp_session(conn: socket.socket, ttype: str,
     if sender is not None:
         sender.join(timeout=3.0)
 
+    with ses.lock:
+        rx_before_pop = ses.rx_pkts
+    print(f"[DBG sid={sid}] rx_pkts avant pop = {rx_before_pop}", file=sys.stderr, flush=True)
+
     with _ses_lock:
         _sessions.pop(sid, None)
 
@@ -279,8 +283,10 @@ def _handle_udp_session(conn: socket.socket, ttype: str,
     try:
         msg = json.loads(_recv_line(conn, timeout=5.0))
         total_sent = int(msg.get("total_sent", 0))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[DBG sid={sid}] échec lecture total_sent : {e}", file=sys.stderr, flush=True)
+
+    print(f"[DBG sid={sid}] total_sent={total_sent}  rx_pkts={rx_before_pop}  perte={round(max(0,(1-rx_before_pop/total_sent)*100),1) if total_sent else '?'}%", file=sys.stderr, flush=True)
 
     result = ses.result
     if total_sent > 0:

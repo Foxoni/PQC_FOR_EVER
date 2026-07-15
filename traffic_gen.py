@@ -343,12 +343,14 @@ def cmd_jitter(target: str, duration: int, outfile: str) -> None:
         t_s.join(timeout=3)
 
         # Envoyer le total réel au serveur pour un calcul de perte précis
+        print(f"[DBG jitter sid={sid}] total_sent={_seq[0]}", file=sys.stderr, flush=True)
         try:
             ctrl.sendall((json.dumps({"total_sent": _seq[0]}) + "\n").encode())
         except OSError:
             pass
 
         result = json.loads(_recv_line(ctrl, timeout=15))
+        print(f"[DBG jitter sid={sid}] résultat serveur : {result}", file=sys.stderr, flush=True)
 
     except Exception as e:
         result = {"jitter_ms": -1, "lost_pct": -1, "throughput_mbps": 0.0, "error": str(e)}
