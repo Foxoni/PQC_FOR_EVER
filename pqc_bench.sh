@@ -432,7 +432,8 @@ net_jitter_start() {
         _JITTER_PID=0; return
     fi
     _JITTER_FILE="/tmp/pqc_jitter_$$.json"
-    python3 "$SCRIPT_PY" jitter "$target" "$duration" "$_JITTER_FILE" &
+    _JITTER_DBG="/tmp/pqc_jitter_dbg_$$.log"
+    python3 "$SCRIPT_PY" jitter "$target" "$duration" "$_JITTER_FILE" 2>"$_JITTER_DBG" &
     _JITTER_PID=$!
 }
 
@@ -453,6 +454,10 @@ except Exception:
 PYEOF
 )
     rm -f "$_JITTER_FILE"; _JITTER_FILE=""
+    if [[ -f "${_JITTER_DBG:-}" ]]; then
+        grep DBG "$_JITTER_DBG" >&2 || true
+        rm -f "$_JITTER_DBG"; _JITTER_DBG=""
+    fi
 }
 
 # Mesure le temps d'établissement TCP seul (avant TLS).
