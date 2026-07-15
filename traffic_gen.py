@@ -335,24 +335,12 @@ def cmd_jitter(target: str, duration: int, outfile: str) -> None:
                     time.sleep(max(0.0, (chunk - tokens) / bps * 0.8))
             _seq[0] = seq
 
-        def _recv() -> None:
-            udp.settimeout(1.0)
-            while not stop.is_set():
-                try:
-                    udp.recvfrom(4096)
-                except socket.timeout:
-                    pass
-                except OSError:
-                    break
-
+        # Jitter unidirectionnel : le serveur ne renvoie plus, pas besoin de _recv
         t_s = threading.Thread(target=_send, daemon=True)
-        t_r = threading.Thread(target=_recv, daemon=True)
         t_s.start()
-        t_r.start()
         time.sleep(duration + 1.5)
         stop.set()
         t_s.join(timeout=3)
-        t_r.join(timeout=3)
 
         # Envoyer le total réel au serveur pour un calcul de perte précis
         try:

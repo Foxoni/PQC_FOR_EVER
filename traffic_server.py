@@ -258,12 +258,18 @@ def _handle_udp_session(conn: socket.socket, ttype: str,
 
     conn.sendall(b'{"ready":true}\n')
 
-    sender = threading.Thread(target=_udp_sender, args=(ses,), daemon=True)
-    sender.start()
+    # jitter : unidirectionnel (client→serveur uniquement) pour éviter
+    # la contention sur _udp_sock entre threads émetteurs et récepteur
+    if ttype != "jitter":
+        sender = threading.Thread(target=_udp_sender, args=(ses,), daemon=True)
+        sender.start()
+    else:
+        sender = None
 
     time.sleep(duration + 2.0)
     ses.done.set()
-    sender.join(timeout=3.0)
+    if sender is not None:
+        sender.join(timeout=3.0)
 
     with _ses_lock:
         _sessions.pop(sid, None)
