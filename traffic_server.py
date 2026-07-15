@@ -280,8 +280,9 @@ def _handle_udp_session(conn: socket.socket, ttype: str,
         try:
             msg = json.loads(_recv_line(conn, timeout=5.0))
             total_sent = int(msg.get("total_sent", 0))
-        except Exception:
-            pass
+            print(f"[DBG sid={sid}] total_sent reçu = {total_sent}  rx_pkts = {ses.rx_pkts}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[DBG sid={sid}] échec lecture total_sent : {e}  rx_pkts = {ses.rx_pkts}", file=sys.stderr, flush=True)
 
     result = ses.result
     if total_sent > 0:
