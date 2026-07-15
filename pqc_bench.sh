@@ -537,6 +537,9 @@ capture_hs_start() {
         sleep 0.1
         (( i++ )) || true
     done
+    # Laisser le thread de capture tshark démarrer après l'en-tête PCAP
+    # (race condition : l'en-tête est écrit avant que la boucle de capture soit active)
+    sleep 0.15
 
     if ! kill -0 "$_TSHARK_PID" 2>/dev/null; then
         log_warn "tshark n'a pas démarré sur $iface — $(head -1 "$tshark_log" 2>/dev/null)"
@@ -577,7 +580,10 @@ try:
         mf = parts[1] if len(parts) > 1 else ""
         fo = parts[2] if len(parts) > 2 else ""
         if mf == "1" or (fo and fo != "0"): frag += 1
-    print(pkts, total_bytes, round(frag / pkts * 100, 2) if pkts else -1)
+    if pkts > 0:
+        print(pkts, total_bytes, round(frag / pkts * 100, 2))
+    else:
+        print(-1, -1, -1)
 except Exception:
     print(-1, -1, -1)
 PYEOF
