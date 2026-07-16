@@ -814,7 +814,19 @@ class ServerCLI:
                     pass
             return vals
 
-        hs   = _col("Handshake_ms", "handshake_event_ms")
+        def _col_all(name, alt=None):
+            """Collecte toutes les valeurs y compris -1 (echecs inclus)."""
+            vals = []
+            for r in rows:
+                raw = r.get(name) or (r.get(alt) if alt else None)
+                try:
+                    vals.append(float(raw))
+                except (TypeError, ValueError):
+                    pass
+            return vals
+
+        hs_all = _col_all("Handshake_ms", "handshake_event_ms")
+        hs     = [v for v in hs_all if v >= 0]
         dbt  = _col("Debit_Mbps",   "throughput_mbps")
         cpu  = _col("CPU_moy_pct",  "cpu_avg_pct")
         ram  = _col("RAM_moy_Mo",   "ram_avg_mb")
@@ -837,13 +849,16 @@ class ServerCLI:
         def mx(v):  return round(max(v), 3)             if v else ""
         def sumv(v): return int(sum(v))                 if v else ""
 
+        hs_event_failures = sum(1 for v in hs_all if v < 0)
+        bulk_failures = sumv(conn_err) if conn_err else 0
+
         first = rows[0] if rows else {}
         mode  = first.get("Mode") or first.get("mode", "?")
         ttype = first.get("Type_test") or first.get("schedule", "?")
 
         return {
             "Mode": mode, "Type_test": ttype,
-            "Handshake_moy_ms": avg(hs), "Handshake_min_ms": mn(hs), "Handshake_max_ms": mx(hs),
+            "Handshake_moy_ms": avg(hs), "Handshake_min_ms": mn(hs_all), "Handshake_max_ms": mx(hs),
             "Debit_moy_Mbps":   avg(dbt), "Debit_min_Mbps": mn(dbt), "Debit_max_Mbps": mx(dbt),
             "CPU_moy_pct":   avg(cpu),
             "RAM_moy_Mo":    avg(ram),
@@ -859,7 +874,7 @@ class ServerCLI:
             "Handshake_octets_moy":    avg(hs_bytes),
             "TCP_connect_moy_ms":      avg(tcp_conn),
             "TTFB_moy_ms":             avg(ttfb),
-            "Connexions_echec_total":  sumv(conn_err),
+            "Connexions_echec_total":  bulk_failures + hs_event_failures,
             "Nb_evenements": len(rows),
         }
 
